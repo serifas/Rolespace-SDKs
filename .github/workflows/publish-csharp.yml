@@ -1,0 +1,46 @@
+name: Publish .NET SDK
+
+# Fires when you push a tag like cs-v0.1.0. The tag's version is informational —
+# the actual published version is read from csharp/Rolespace.Sdk.csproj.
+on:
+    push:
+        tags:
+            - 'cs-v*'
+
+jobs:
+    publish:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0   # Source Link needs the full git history
+
+            - uses: actions/setup-dotnet@v4
+              with:
+                  dotnet-version: '8.0.x'
+
+            - name: Sanity-check tag vs csproj
+              working-directory: csharp
+              run: |
+                  TAG="${GITHUB_REF_NAME#cs-v}"
+                  PKG=$(grep -oPm1 '(?<=<Version>)[^<]+' Rolespace.Sdk.csproj)
+                  if [ "$TAG" != "$PKG" ]; then
+                      echo "Tag version ($TAG) does not match csproj version ($PKG)" >&2
+                      exit 1
+                  fi
+
+            - name: Restore + build
+              working-directory: csharp
+              run: dotnet build -c Release --nologo
+
+            - name: Pack
+              working-directory: csharp
+              run: dotnet pack -c Release --no-build --output ./nupkg --nologo
+
+            - name: Push to nuget.org
+              working-directory: csharp
+              run: |
+                  dotnet nuget push './nupkg/*.nupkg' \
+                      --api-key "${{ secrets.NUGET_API_KEY }}" \
+                      --source 'https://api.nuget.org/v3/index.json' \
+                      --skip-duplicate

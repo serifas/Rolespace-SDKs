@@ -1,0 +1,39 @@
+[project]
+name = "rolespace"
+version = "0.1.0"
+description = "Official Rolespace bot SDK for Python"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.8"
+authors = [{ name = "Rolespace" }]
+dependencies = ["requests>=2.28"]
+keywords = ["rolespace", "bot", "sdk", "chat", "api", "webhook"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications :: Chat",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/rolespace/rolespace-sdks/tree/main/python"
+Documentation = "https://rolespace.net/Developer/Docs"
+Source = "https://github.com/rolespace/rolespace-sdks"
+Issues = "https://github.com/rolespace/rolespace-sdks/issues"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["rolespace"]

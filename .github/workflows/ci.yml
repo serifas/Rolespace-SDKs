@@ -1,0 +1,52 @@
+name: CI
+
+# Light sanity checks that every SDK still loads. Runs on PRs and on pushes to main.
+# Real test suites can be added later under each language folder.
+on:
+    pull_request:
+    push:
+        branches: [main]
+
+jobs:
+    node:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with: { node-version: '20' }
+            - name: Module loads
+              working-directory: node
+              run: node -e "require('./rolespace.js').Rolespace; console.log('ok')"
+            - name: npm pack (dry-run)
+              working-directory: node
+              run: npm pack --dry-run
+
+    python:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-python@v5
+              with: { python-version: '3.11' }
+            - name: Install
+              working-directory: python
+              run: python -m pip install -e .
+            - name: Module loads
+              run: python -c "import rolespace; print('ok')"
+            - name: Build
+              working-directory: python
+              run: |
+                  python -m pip install build
+                  python -m build
+
+    dotnet:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-dotnet@v4
+              with: { dotnet-version: '8.0.x' }
+            - name: Build
+              working-directory: csharp
+              run: dotnet build -c Release --nologo
+            - name: Pack
+              working-directory: csharp
+              run: dotnet pack -c Release --no-build --output ./nupkg --nologo

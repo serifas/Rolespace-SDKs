@@ -1,0 +1,37 @@
+{
+    "name": "rolespace",
+    "version": "0.1.0",
+    "description": "Official Rolespace bot SDK for Node.js",
+    "main": "rolespace.js",
+    "engines": { "node": ">=18" },
+    "license": "MIT",
+    "author": "Rolespace",
+    "keywords": [
+        "rolespace",
+        "bot",
+        "sdk",
+        "chat",
+        "api",
+        "webhook"
+    ],
+    "files": [
+        "rolespace.js",
+        "README.md",
+        "LICENSE"
+    ],
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/rolespace/rolespace-sdks.git",
+        "directory": "node"
+    },
+    "homepage": "https://github.com/rolespace/rolespace-sdks/tree/main/node#readme",
+    "bugs": {
+        "url": "https://github.com/rolespace/rolespace-sdks/issues"
+    },
+    "publishConfig": {
+        "access": "public"
+    },
+    "scripts": {
+        "smoke": "node -e \"require('./rolespace.js').Rolespace; console.log('ok')\""
+    }
+}

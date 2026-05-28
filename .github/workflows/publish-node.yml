@@ -1,0 +1,43 @@
+name: Publish Node SDK
+
+# Fires when you push a tag like node-v0.1.0. The tag's version is informational
+# only — the actual version published to npm is read from node/package.json, so
+# bump that first, commit, then tag.
+on:
+    push:
+        tags:
+            - 'node-v*'
+
+jobs:
+    publish:
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+            id-token: write   # for npm provenance
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: '20'
+                  registry-url: 'https://registry.npmjs.org'
+
+            - name: Smoke-test
+              working-directory: node
+              run: node -e "require('./rolespace.js').Rolespace; console.log('module loads OK')"
+
+            - name: Sanity-check tag vs package.json
+              working-directory: node
+              run: |
+                  TAG="${GITHUB_REF_NAME#node-v}"
+                  PKG=$(node -p "require('./package.json').version")
+                  if [ "$TAG" != "$PKG" ]; then
+                      echo "Tag version ($TAG) does not match package.json version ($PKG)" >&2
+                      exit 1
+                  fi
+
+            - name: Publish to npm
+              working-directory: node
+              run: npm publish --provenance --access public
+              env:
+                  NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

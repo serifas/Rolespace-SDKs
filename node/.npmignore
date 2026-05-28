@@ -1,0 +1,5 @@
+# Source-only; rely on package.json "files" allowlist, but be explicit anyway.
+.github/
+node_modules/
+*.tgz
+.npm/
