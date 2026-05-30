@@ -8,15 +8,19 @@
 //   using Rolespace.Sdk;
 //   var rs = RolespaceClient.FromEnv();          // reads ROLESPACE_BOT_TOKEN
 //   var me = await rs.MeAsync();
-//   Console.WriteLine($"Logged in as {me.GetProperty("bot").GetProperty("username").GetString()}");
+//   Console.WriteLine($"Logged in as {me.Bot.Username}");
 //
 // What this SDK gives you that raw HttpClient doesn't:
+//   - Strongly-typed responses: msg.Content instead of msg.GetProperty("content").GetString()
 //   - Token is loaded from env by default (no hardcoded tokens in source)
 //   - 429 rate-limit retries with exponential backoff + Retry-After
-//   - IAsyncEnumerable<JsonElement> over interactions (no manual polling loop)
+//   - IAsyncEnumerable<RolespaceInteraction> over interactions (no manual polling loop)
 //   - Constant-time webhook signature verification (RolespaceClient.VerifyWebhook)
 //   - TLS verification is enforced; can only be disabled with an explicit, scary opt-in
 //   - ToString() never leaks the token
+//
+// Escape hatch: every typed model exposes .Raw — the original JsonElement — so any
+// field that isn't modelled yet can still be reached without forking the SDK.
 
 using System;
 using System.Collections.Generic;
@@ -47,7 +51,7 @@ public class RolespaceException : Exception
 public sealed class RolespaceClient : IDisposable
 {
     private const string DefaultBase = "https://rolespace.net";
-    private const string SdkVersion = "0.1.0";
+    private const string SdkVersion = "0.2.0";
 
     private readonly HttpClient _http;
     private readonly bool _ownsHttp;
@@ -138,27 +142,71 @@ public sealed class RolespaceClient : IDisposable
     public Task<JsonElement> PutAsync(string path, object? body = null, CancellationToken ct = default)   => RequestAsync(HttpMethod.Put,    path, body ?? new { }, ct);
     public Task<JsonElement> DeleteAsync(string path, CancellationToken ct = default)            => RequestAsync(HttpMethod.Delete, path, null, ct);
 
-    // ---- Typed convenience helpers ----
-    public Task<JsonElement> MeAsync(CancellationToken ct = default)                                  => GetAsync("/me", ct);
-    public Task<JsonElement> ServersAsync(CancellationToken ct = default)                             => GetAsync("/servers", ct);
-    public Task<JsonElement> ServerAsync(long id, CancellationToken ct = default)                     => GetAsync($"/servers/{id}", ct);
-    public Task<JsonElement> ServerChannelsAsync(long id, CancellationToken ct = default)             => GetAsync($"/servers/{id}/channels", ct);
-    public Task<JsonElement> ServerMembersAsync(long id, CancellationToken ct = default)              => GetAsync($"/servers/{id}/members", ct);
+    // ---- Typed convenience helpers ────────────────────────────────────────
+    // These return strongly-typed wrapper classes so callers can write
+    //   var me = await rs.MeAsync();
+    //   Console.WriteLine(me.Bot.Username);
+    // instead of digging through JsonElement.GetProperty(...) chains. Every wrapper
+    // exposes .Raw if you need the underlying JsonElement (e.g. for an unmodelled field).
 
-    public Task<JsonElement> SendMessageAsync(long serverId, long channelId, string text, CancellationToken ct = default)
-        => PostAsync($"/servers/{serverId}/channels/{channelId}/messages", new { content = text }, ct);
-    public Task<JsonElement> SendMessageAsync(long serverId, long channelId, object payload, CancellationToken ct = default)
-        => PostAsync($"/servers/{serverId}/channels/{channelId}/messages", payload, ct);
+    /// <summary>The authenticated application + bot identity + owner + scopes.</summary>
+    public async Task<RolespaceMe> MeAsync(CancellationToken ct = default)
+        => new(await GetAsync("/me", ct).ConfigureAwait(false));
 
-    public Task<JsonElement> SendDmAsync(long recipientId, string text, CancellationToken ct = default)
-        => PostAsync("/dm", new { recipientId, content = text }, ct);
+    /// <summary>All servers the bot has been added to (summary objects — no channels).</summary>
+    public Task<List<RolespaceServer>> ServersAsync(CancellationToken ct = default)
+        => GetListAsync("/servers", el => new RolespaceServer(el), ct);
 
-    // ---- Interaction polling ----
+    /// <summary>One server with its categories and visible channels.</summary>
+    public async Task<RolespaceServer> ServerAsync(long id, CancellationToken ct = default)
+        => new(await GetAsync($"/servers/{id}", ct).ConfigureAwait(false));
+
+    /// <summary>Flat list of channels the bot can view in the server.</summary>
+    public Task<List<RolespaceChannel>> ServerChannelsAsync(long id, CancellationToken ct = default)
+        => GetListAsync($"/servers/{id}/channels", el => new RolespaceChannel(el), ct);
+
+    /// <summary>All members of the server.</summary>
+    public Task<List<RolespaceMember>> ServerMembersAsync(long id, CancellationToken ct = default)
+        => GetListAsync($"/servers/{id}/members", el => new RolespaceMember(el), ct);
+
+    /// <summary>One member of the server.</summary>
+    public async Task<RolespaceMember> ServerMemberAsync(long serverId, long userId, CancellationToken ct = default)
+        => new(await GetAsync($"/servers/{serverId}/members/{userId}", ct).ConfigureAwait(false));
+
+    /// <summary>All roles in the server, highest position first.</summary>
+    public Task<List<RolespaceRole>> ServerRolesAsync(long id, CancellationToken ct = default)
+        => GetListAsync($"/servers/{id}/roles", el => new RolespaceRole(el), ct);
+
+    /// <summary>Send a plain-text message. Returns the message including its server-assigned id.</summary>
+    public async Task<RolespaceMessage> SendMessageAsync(long serverId, long channelId, string text, CancellationToken ct = default)
+        => new(await PostAsync($"/servers/{serverId}/channels/{channelId}/messages",
+            new { content = text }, ct).ConfigureAwait(false));
+
+    /// <summary>Send a richer message — pass an anonymous object with content/embeds/components/replyToMessageId.</summary>
+    public async Task<RolespaceMessage> SendMessageAsync(long serverId, long channelId, object payload, CancellationToken ct = default)
+        => new(await PostAsync($"/servers/{serverId}/channels/{channelId}/messages",
+            payload, ct).ConfigureAwait(false));
+
+    /// <summary>Fetch a single message by id.</summary>
+    public async Task<RolespaceMessage> GetMessageAsync(long serverId, long channelId, string messageId, CancellationToken ct = default)
+        => new(await GetAsync($"/servers/{serverId}/channels/{channelId}/messages/{messageId}", ct).ConfigureAwait(false));
+
+    /// <summary>Send a direct message to a user.</summary>
+    public async Task<RolespaceMessage> SendDmAsync(long recipientId, string text, CancellationToken ct = default)
+        => new(await PostAsync("/dm", new { recipientId, content = text }, ct).ConfigureAwait(false));
+
+    // ---- Interaction polling ──────────────────────────────────────────────
     /// <summary>
-    /// Async stream of interactions. Resolves the polling loop, backoff, and cursor for you:
-    /// <code>await foreach (var ix in rs.InteractionsAsync()) { ... }</code>
+    /// Async stream of interactions (button clicks, select choices, modal submits).
+    /// Resolves the polling loop, backoff, and cursor for you:
+    /// <code>
+    /// await foreach (var ix in rs.InteractionsAsync())
+    /// {
+    ///     if (ix.CustomId == "book") await rs.RespondAsync(ix.Id, new { type = "message", content = "Booked!" });
+    /// }
+    /// </code>
     /// </summary>
-    public async IAsyncEnumerable<JsonElement> InteractionsAsync(int idleDelayMs = 1000, [EnumeratorCancellation] CancellationToken ct = default)
+    public async IAsyncEnumerable<RolespaceInteraction> InteractionsAsync(int idleDelayMs = 1000, [EnumeratorCancellation] CancellationToken ct = default)
     {
         long after = 0;
         while (!ct.IsCancellationRequested)
@@ -169,7 +217,7 @@ public sealed class RolespaceClient : IDisposable
             {
                 foreach (var ix in data.EnumerateArray())
                 {
-                    yield return ix.Clone();
+                    yield return new RolespaceInteraction(ix.Clone());
                     yielded++;
                 }
             }
@@ -180,9 +228,29 @@ public sealed class RolespaceClient : IDisposable
         }
     }
 
-    /// <summary>Respond to an interaction. <paramref name="reply"/> is anonymous-object: <c>new { type = "message", content = "hi", ephemeral = true }</c>.</summary>
+    /// <summary>Respond to an interaction. <paramref name="reply"/> is an anonymous object:
+    /// <c>new { type = "message", content = "hi", ephemeral = true }</c>.
+    /// Response shape varies by reply type, so this stays raw JsonElement.</summary>
     public Task<JsonElement> RespondAsync(long interactionId, object reply, CancellationToken ct = default)
         => PostAsync($"/interactions/{interactionId}/callback", reply, ct);
+
+    // ─── internal: unwrap "{ data: [...] }" list responses ──────────────────
+    private async Task<List<T>> GetListAsync<T>(string path, Func<JsonElement, T> map, CancellationToken ct)
+    {
+        var resp = await GetAsync(path, ct).ConfigureAwait(false);
+        var list = new List<T>();
+        // Some endpoints return { data: [...] }; older ones returned a bare array. Handle both.
+        JsonElement arr = default;
+        if (resp.ValueKind == JsonValueKind.Array)
+            arr = resp;
+        else if (resp.ValueKind == JsonValueKind.Object && resp.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array)
+            arr = data;
+        else
+            return list;
+        foreach (var item in arr.EnumerateArray())
+            list.Add(map(item.Clone()));
+        return list;
+    }
 
     // ---- Webhook signature verification ----
     /// <summary>

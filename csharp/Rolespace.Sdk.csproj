@@ -8,7 +8,7 @@
 
         <!-- NuGet package metadata -->
         <PackageId>Rolespace.Sdk</PackageId>
-        <Version>0.1.0</Version>
+        <Version>0.2.0</Version>
         <Authors>Rolespace</Authors>
         <Company>Rolespace</Company>
         <Description>Official Rolespace bot SDK for .NET. Bearer-token client with built-in 429 retry, an interactions IAsyncEnumerable, and constant-time webhook signature verification.</Description>
