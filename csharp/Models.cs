@@ -339,3 +339,110 @@ public sealed class RolespaceInteraction : RolespaceObject
 
     public DateTime? CreatedAt => DateTimeOrNull("createdAt");
 }
+
+// ════════════════════════ Embeds (rich cards) ═══════════════════════════
+//
+// Embeds are OUTBOUND objects — you build them and pass them to SendMessageAsync.
+// They serialize to JSON via the SDK's camelCase + ignore-null serializer, so a
+// property left at its default just isn't sent. That's why every field is nullable
+// (or a collection that lazy-allocates).
+//
+// Two styles work — pick whichever reads better:
+//
+//   // Object-initializer style:
+//   var card = new RolespaceEmbed {
+//       Title = "Patch 2.4",
+//       Description = "Snappier sidebar.",
+//       Color = "#5f85f7",
+//   };
+//   card.AddField("Author", "@lynn", inline: true);
+//
+//   // Fluent builder style:
+//   var card = new RolespaceEmbed()
+//       .WithTitle("Patch 2.4")
+//       .WithDescription("Snappier sidebar.")
+//       .WithColor("#5f85f7")
+//       .AddField("Author", "@lynn", inline: true);
+//
+//   await rs.SendMessageAsync(serverId, channelId, "Heads up:", card);
+
+/// <summary>A rich card you can attach to a message — title/description/fields/image/etc.
+/// Pass one or more to <see cref="RolespaceClient.SendMessageAsync(long, long, string, RolespaceEmbed[])"/>.</summary>
+public sealed class RolespaceEmbed
+{
+    public string? Title { get; set; }
+    /// <summary>Optional URL the title hyperlinks to.</summary>
+    public string? Url { get; set; }
+    public string? Description { get; set; }
+    /// <summary>Hex string like <c>"#5f85f7"</c>.</summary>
+    public string? Color { get; set; }
+    /// <summary>Main image URL.</summary>
+    public string? Image { get; set; }
+    /// <summary>Sensitivity flag for the main image — one of <c>"nsfw"</c>, <c>"triggering"</c>,
+    /// <c>"spoiler"</c>. Flagged images render blurred behind a click-to-reveal cover.</summary>
+    public string? ImageFlag { get; set; }
+    /// <summary>Small thumbnail URL shown in the top-right of the card.</summary>
+    public string? Thumbnail { get; set; }
+    public RolespaceEmbedAuthor? Author { get; set; }
+    /// <summary>Footer text (plain string).</summary>
+    public string? Footer { get; set; }
+    /// <summary>Inline name/value fields. Null until the first AddField call.</summary>
+    public List<RolespaceEmbedField>? Fields { get; set; }
+    /// <summary>Extra image strip rendered below the main image (up to 24). Null until first add.</summary>
+    public List<RolespaceEmbedGalleryItem>? Gallery { get; set; }
+
+    // ── fluent setters ────────────────────────────────────────────────────
+    public RolespaceEmbed WithTitle(string title)               { Title = title; return this; }
+    public RolespaceEmbed WithUrl(string url)                   { Url = url; return this; }
+    public RolespaceEmbed WithDescription(string description)   { Description = description; return this; }
+    public RolespaceEmbed WithColor(string hexColor)            { Color = hexColor; return this; }
+    public RolespaceEmbed WithImage(string url, string? flag = null) { Image = url; ImageFlag = flag; return this; }
+    public RolespaceEmbed WithThumbnail(string url)             { Thumbnail = url; return this; }
+    public RolespaceEmbed WithAuthor(string name, string? iconUrl = null)
+    {
+        Author = new RolespaceEmbedAuthor { Name = name, IconUrl = iconUrl };
+        return this;
+    }
+    public RolespaceEmbed WithFooter(string footer)             { Footer = footer; return this; }
+
+    /// <summary>Append an inline name/value field. Up to 25 fields per embed.</summary>
+    public RolespaceEmbed AddField(string name, string value, bool inline = false)
+    {
+        (Fields ??= new List<RolespaceEmbedField>()).Add(new RolespaceEmbedField
+        {
+            Name = name, Value = value, Inline = inline
+        });
+        return this;
+    }
+
+    /// <summary>Append a gallery image. Up to 24 per embed; the strip renders below the main image.</summary>
+    public RolespaceEmbed AddGalleryImage(string url, string? flag = null)
+    {
+        (Gallery ??= new List<RolespaceEmbedGalleryItem>()).Add(new RolespaceEmbedGalleryItem
+        {
+            Url = url, Flag = flag
+        });
+        return this;
+    }
+}
+
+public sealed class RolespaceEmbedField
+{
+    public string Name { get; set; } = "";
+    public string Value { get; set; } = "";
+    public bool Inline { get; set; }
+}
+
+public sealed class RolespaceEmbedAuthor
+{
+    public string Name { get; set; } = "";
+    /// <summary>Small avatar/icon URL shown next to the author name.</summary>
+    public string? IconUrl { get; set; }
+}
+
+public sealed class RolespaceEmbedGalleryItem
+{
+    public string Url { get; set; } = "";
+    /// <summary>One of <c>"nsfw"</c>, <c>"triggering"</c>, <c>"spoiler"</c>.</summary>
+    public string? Flag { get; set; }
+}

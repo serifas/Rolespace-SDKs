@@ -5,25 +5,42 @@
  * Requires Node 18+ (uses built-in fetch + crypto).
  *
  * Quick start:
- *   const { Rolespace } = require('./rolespace');
+ *   const { Rolespace, RolespaceEmbed } = require('rolespace');
  *   const rs = Rolespace.fromEnv();              // reads ROLESPACE_BOT_TOKEN
  *   const me = await rs.me();
  *   console.log(`Logged in as ${me.bot.username}`);
  *
+ *   const msg = await rs.sendMessage(serverId, channelId, 'Hello!');
+ *   console.log(msg.id, msg.content);
+ *
+ *   const card = new RolespaceEmbed()
+ *       .withTitle('Patch 2.4')
+ *       .withColor('#5f85f7')
+ *       .addField('Author', '@lynn', true);
+ *   await rs.sendMessage(serverId, channelId, 'Heads up:', card);
+ *
  * What this SDK gives you that raw fetch doesn't:
+ *   - Strongly-typed wrapper classes: msg.content instead of msg.content
+ *     (yes, JS is loose anyway — but you get IntelliSense in TypeScript via JSDoc,
+ *     plus the wrapper protects from missing fields throwing.)
+ *   - RolespaceEmbed builder so you don't hand-shape JSON for rich cards
  *   - Token is loaded from env by default (no hardcoded tokens in source)
  *   - 429 rate-limit retries with exponential backoff + Retry-After
  *   - Async iterator over interactions (no manual polling loop)
  *   - Constant-time webhook signature verification (Rolespace.verifyWebhook)
  *   - TLS verification is enforced; can only be disabled with an explicit, scary opt-in
  *   - Authorization header is never logged
+ *
+ * Escape hatch: every typed wrapper exposes `.raw` — the underlying parsed JSON
+ * object — so any field the server adds before this SDK is updated still works:
+ *   const newField = msg.raw.brandNewField;
  */
 'use strict';
 
 const crypto = require('crypto');
 
 const DEFAULT_BASE = 'https://rolespace.net';
-const SDK_VERSION = '0.1.0';
+const SDK_VERSION = '0.2.0';
 
 class RolespaceError extends Error {
     constructor(message, status, body) {
@@ -34,13 +51,209 @@ class RolespaceError extends Error {
     }
 }
 
+// ═══════════════════ Response wrapper base class ═══════════════════════
+// All typed response wrappers extend this. Subclasses just declare getters
+// over `this._raw` for the fields they care about. Missing fields return
+// undefined (or sensible defaults from coerce helpers) instead of throwing.
+
+class RolespaceObject {
+    constructor(raw) {
+        // Store the underlying parsed JSON so callers can always reach unmodelled fields.
+        Object.defineProperty(this, '_raw', { value: raw || {}, enumerable: false });
+    }
+    /** The underlying parsed JSON. Use for fields not yet modelled. */
+    get raw() { return this._raw; }
+
+    /** Sensible toJSON so JSON.stringify(wrapper) gives back the original shape. */
+    toJSON() { return this._raw; }
+}
+
+// ═══════════════════════════ /me ═══════════════════════════════════════
+
+class RolespaceMe extends RolespaceObject {
+    /** The bot account — author of anything the bot does. */
+    get bot() { return new RolespaceUser(this._raw.bot || {}); }
+    /** The human owner, if visible. */
+    get owner() { return this._raw.owner ? new RolespaceUser(this._raw.owner) : null; }
+    /** Granted OAuth-style scopes. */
+    get scopes() { return (this._raw.application && this._raw.application.scopes) || []; }
+    /** Numeric id of the application registration. */
+    get applicationId() { return (this._raw.application && this._raw.application.id) || 0; }
+}
+
+// ═══════════════════════ Users / members ═══════════════════════════════
+
+class RolespaceUser extends RolespaceObject {
+    /** Numeric account id. Same id everywhere in the API. */
+    get id() { return this._raw.id ?? this._raw.userId ?? 0; }
+    get username() { return this._raw.username || ''; }
+    get displayName() { return this._raw.displayName || ''; }
+    get nickname() { return this._raw.nickname || null; }
+    get avatarUrl() { return this._raw.avatar || this._raw.avatarUrl || null; }
+}
+
+class RolespaceMember extends RolespaceUser {
+    /** True if this member owns the server. */
+    get isOwner() { return !!this._raw.isOwner; }
+    /** Role ids assigned to this member in this server. */
+    get roleIds() { return this._raw.roleIds || []; }
+}
+
+// ═══════════════════════════ Servers ═══════════════════════════════════
+
+class RolespaceServer extends RolespaceObject {
+    get id() { return this._raw.id || 0; }
+    get name() { return this._raw.name || ''; }
+    get description() { return this._raw.description || null; }
+    get iconUrl() { return this._raw.iconUrl || null; }
+    get bannerUrl() { return this._raw.bannerUrl || null; }
+    get isPublic() { return !!this._raw.isPublic; }
+    get ownerId() { return this._raw.ownerId || 0; }
+    get memberCount() { return this._raw.memberCount || 0; }
+    get createdAt() { return this._raw.createdAt || null; }
+    get categories() { return (this._raw.categories || []).map(c => new RolespaceCategory(c)); }
+    /** Flatten the category tree into a single channel list. */
+    allChannels() {
+        const out = [];
+        for (const cat of this.categories) for (const ch of cat.channels) out.push(ch);
+        return out;
+    }
+}
+
+class RolespaceCategory extends RolespaceObject {
+    get id() { return this._raw.id || 0; }
+    get name() { return this._raw.name || ''; }
+    get position() { return this._raw.position || 0; }
+    get channels() { return (this._raw.channels || []).map(c => new RolespaceChannel(c)); }
+}
+
+class RolespaceChannel extends RolespaceObject {
+    get id() { return this._raw.id || 0; }
+    get serverId() { return this._raw.serverId || 0; }
+    get categoryId() { return this._raw.categoryId || null; }
+    get categoryName() { return this._raw.categoryName || null; }
+    get name() { return this._raw.name || ''; }
+    get topic() { return this._raw.topic || null; }
+    /** Lowercase string: text, voice, announcement, forum, rules. */
+    get type() { return this._raw.type || ''; }
+    get position() { return this._raw.position || 0; }
+    get isNsfw() { return !!this._raw.isNsfw; }
+    get isPrivate() { return !!this._raw.isPrivate; }
+}
+
+class RolespaceRole extends RolespaceObject {
+    get id() { return this._raw.id || 0; }
+    get name() { return this._raw.name || ''; }
+    get color() { return this._raw.color || null; }
+    get position() { return this._raw.position || 0; }
+    get isEveryone() { return !!this._raw.isEveryone; }
+    get isDefault() { return !!this._raw.isDefault; }
+    get permissions() { return this._raw.permissions || {}; }
+}
+
+// ═══════════════════════════ Messages ══════════════════════════════════
+
+class RolespaceMessage extends RolespaceObject {
+    /** String id (GUID). Message ids are strings, NOT numeric. */
+    get id() { return this._raw.id || ''; }
+    get channelId() { return this._raw.channelId || 0; }
+    get serverId() { return this._raw.serverId || 0; }
+    get content() { return this._raw.content || ''; }
+    get timestamp() { return this._raw.timestamp || null; }
+    get editedAt() { return this._raw.editedAt || null; }
+    get isPinned() { return !!this._raw.isPinned; }
+    get replyToMessageId() { return this._raw.replyToMessageId || null; }
+    get author() { return new RolespaceUser(this._raw.author || {}); }
+    get reactions() { return this._raw.reactions || []; }
+    get attachments() { return this._raw.attachments || []; }
+}
+
+// ═══════════════════════ Interactions ══════════════════════════════════
+
+class RolespaceInteraction extends RolespaceObject {
+    /** Numeric interaction id. Pass to client.respond(...). */
+    get id() { return this._raw.id || 0; }
+    /** One of 'button', 'select', 'modal_submit'. */
+    get type() { return this._raw.type || ''; }
+    /** The customId the bot set on the component. Use this to dispatch. */
+    get customId() { return this._raw.customId || ''; }
+    get serverId() { return this._raw.serverId || 0; }
+    get channelId() { return this._raw.channelId || 0; }
+    /** String id of the source message. */
+    get messageId() { return this._raw.messageId || null; }
+    /** Who clicked / submitted. */
+    get user() { return new RolespaceUser(this._raw.user || {}); }
+    /** Extra payload — shape varies by type. */
+    get data() { return this._raw.data || null; }
+    get createdAt() { return this._raw.createdAt || null; }
+}
+
+// ════════════════════════ Embeds (rich cards) ══════════════════════════
+//
+// Outbound builder. Two styles work — pick whichever reads better:
+//
+//   // Plain-object style:
+//   const card = new RolespaceEmbed({ title: 'Hi', color: '#5f85f7' });
+//   card.addField('Author', '@lynn', true);
+//
+//   // Fluent builder style:
+//   const card = new RolespaceEmbed()
+//       .withTitle('Hi')
+//       .withColor('#5f85f7')
+//       .addField('Author', '@lynn', true);
+//
+// Pass to sendMessage as the last (or only) argument.
+
+class RolespaceEmbed {
+    constructor(initial) {
+        // Copy whatever the caller passed in; everything optional.
+        Object.assign(this, initial || {});
+    }
+
+    withTitle(title)       { this.title = title; return this; }
+    withUrl(url)           { this.url = url; return this; }
+    withDescription(desc)  { this.description = desc; return this; }
+    /** Hex string like "#5f85f7". */
+    withColor(hex)         { this.color = hex; return this; }
+    /** flag: optional "nsfw" | "triggering" | "spoiler" — render blurred behind a click-to-reveal cover. */
+    withImage(url, flag)   { this.image = url; if (flag) this.imageFlag = flag; return this; }
+    withThumbnail(url)     { this.thumbnail = url; return this; }
+    withAuthor(name, iconUrl) {
+        this.author = iconUrl ? { name, iconUrl } : { name };
+        return this;
+    }
+    withFooter(text)       { this.footer = text; return this; }
+
+    /** Append an inline name/value field. Up to 25 per embed. */
+    addField(name, value, inline = false) {
+        (this.fields ||= []).push({ name, value, inline });
+        return this;
+    }
+
+    /** Append a gallery image. Up to 24 per embed. */
+    addGalleryImage(url, flag) {
+        (this.gallery ||= []).push(flag ? { url, flag } : url);
+        return this;
+    }
+
+    /** Used by JSON.stringify — strips internal stuff. (None here, but kept for future.) */
+    toJSON() {
+        const out = {};
+        for (const k of Object.keys(this)) {
+            if (this[k] !== undefined && this[k] !== null) out[k] = this[k];
+        }
+        return out;
+    }
+}
+
+// ════════════════════════ Main client ══════════════════════════════════
+
 class Rolespace {
     /**
      * @param {object} opts
      * @param {string} opts.token         - Bot token (rsp_*). Required.
      * @param {string} [opts.baseUrl]     - API base URL (default: https://rolespace.net).
      * @param {number} [opts.maxRetries]  - Max 429 retries before giving up (default: 5).
-     * @param {boolean} [opts.dangerouslyDisableTls] - Opt-out of cert verification. Do not use.
      */
     constructor(opts) {
         if (!opts || typeof opts.token !== 'string' || !opts.token.startsWith('rsp_')) {
@@ -49,25 +262,16 @@ class Rolespace {
         this._token = opts.token;
         this._baseUrl = (opts.baseUrl || DEFAULT_BASE).replace(/\/+$/, '');
         this._maxRetries = Number.isInteger(opts.maxRetries) ? opts.maxRetries : 5;
-        this._dangerouslyDisableTls = opts.dangerouslyDisableTls === true;
-        if (this._dangerouslyDisableTls) {
-            // Mirror the user agent of `requests`/`HttpClient` — make this visible.
-            // We don't actually disable TLS unless they ALSO set NODE_TLS_REJECT_UNAUTHORIZED=0,
-            // because we refuse to do it for them. This flag only suppresses our warning.
-        }
     }
 
     /** Build a client from env vars. Reads ROLESPACE_BOT_TOKEN and optional ROLESPACE_API_BASE. */
     static fromEnv() {
         const token = process.env.ROLESPACE_BOT_TOKEN;
-        if (!token) {
-            throw new Error('Rolespace.fromEnv: set ROLESPACE_BOT_TOKEN in your environment');
-        }
+        if (!token) throw new Error('Rolespace.fromEnv: set ROLESPACE_BOT_TOKEN in your environment');
         return new Rolespace({ token, baseUrl: process.env.ROLESPACE_API_BASE });
     }
 
-    // ---- HTTP primitives ----
-    /** Make a raw request. Most callers should use get/post/patch/del or the typed helpers. */
+    // ---- HTTP primitives ─────────────────────────────────────────────────
     async request(method, path, body) {
         const url = path.startsWith('http') ? path : this._baseUrl + (path.startsWith('/') ? path : '/api/v1/' + path);
         const headers = {
@@ -84,7 +288,6 @@ class Rolespace {
         let attempt = 0;
         while (true) {
             const res = await fetch(url, init);
-            // 429 → wait Retry-After (or exponential backoff) and try again.
             if (res.status === 429 && attempt < this._maxRetries) {
                 const ra = parseFloat(res.headers.get('retry-after') || '0');
                 const waitMs = ra > 0 ? ra * 1000 : Math.min(30000, 500 * Math.pow(2, attempt));
@@ -111,32 +314,98 @@ class Rolespace {
     put(path, body)    { return this.request('PUT',    path, body ?? {}); }
     del(path)          { return this.request('DELETE', path); }
 
-    // ---- Typed convenience helpers ----
-    me() { return this.get('/me'); }
-    servers() { return this.get('/servers'); }
-    server(id) { return this.get(`/servers/${id}`); }
-    serverChannels(id) { return this.get(`/servers/${id}/channels`); }
-    serverMembers(id) { return this.get(`/servers/${id}/members`); }
-    sendMessage(serverId, channelId, payload) {
-        return this.post(`/servers/${serverId}/channels/${channelId}/messages`,
-            typeof payload === 'string' ? { content: payload } : payload);
-    }
-    sendDM(recipientId, payload) {
-        return this.post('/dm', { recipientId, ...(typeof payload === 'string' ? { content: payload } : payload) });
+    // ---- Typed convenience helpers ───────────────────────────────────────
+    // Each wraps the raw response in a typed class so callers get autocompleted
+    // accessors (msg.content) instead of raw dict access (msg.content but also
+    // msg.weirdMisspelling that silently returns undefined).
+
+    /** The authenticated application + bot identity + owner + scopes. */
+    async me() {
+        return new RolespaceMe(await this.get('/me'));
     }
 
-    // ---- Interaction polling ----
+    /** All servers the bot has been added to (summary objects). */
+    async servers() {
+        const resp = await this.get('/servers');
+        return _unwrapList(resp).map(s => new RolespaceServer(s));
+    }
+
+    /** One server with its categories and visible channels. */
+    async server(id) {
+        return new RolespaceServer(await this.get(`/servers/${id}`));
+    }
+
+    /** Flat list of channels the bot can view in the server. */
+    async serverChannels(id) {
+        const resp = await this.get(`/servers/${id}/channels`);
+        return _unwrapList(resp).map(c => new RolespaceChannel(c));
+    }
+
+    /** All members of the server. */
+    async serverMembers(id) {
+        const resp = await this.get(`/servers/${id}/members`);
+        return _unwrapList(resp).map(m => new RolespaceMember(m));
+    }
+
+    /** One member of the server. */
+    async serverMember(serverId, userId) {
+        return new RolespaceMember(await this.get(`/servers/${serverId}/members/${userId}`));
+    }
+
+    /** All roles in the server, highest position first. */
+    async serverRoles(id) {
+        const resp = await this.get(`/servers/${id}/roles`);
+        return _unwrapList(resp).map(r => new RolespaceRole(r));
+    }
+
     /**
-     * Async iterator over interactions. Resolves the polling loop, backoff, and
-     * cursor management for you. Use with `for await`:
+     * Send a message.
+     *
+     * Signatures:
+     *   sendMessage(serverId, channelId, "plain text")
+     *   sendMessage(serverId, channelId, "text", embed)              // RolespaceEmbed
+     *   sendMessage(serverId, channelId, "text", embed1, embed2)     // multiple embeds
+     *   sendMessage(serverId, channelId, embed)                      // embed only, no text
+     *   sendMessage(serverId, channelId, { content, embeds, components, replyToMessageId })
+     *
+     * Returns a RolespaceMessage.
+     */
+    async sendMessage(serverId, channelId, ...rest) {
+        const payload = _buildMessagePayload(rest);
+        return new RolespaceMessage(await this.post(`/servers/${serverId}/channels/${channelId}/messages`, payload));
+    }
+
+    /** Fetch a single message by id. */
+    async getMessage(serverId, channelId, messageId) {
+        return new RolespaceMessage(await this.get(`/servers/${serverId}/channels/${channelId}/messages/${messageId}`));
+    }
+
+    /**
+     * Send a direct message.
+     *   sendDM(recipientId, "text")
+     *   sendDM(recipientId, "text", embed[, embed...])
+     *   sendDM(recipientId, embed)
+     *   sendDM(recipientId, { content, embeds, ... })
+     */
+    async sendDM(recipientId, ...rest) {
+        const payload = _buildMessagePayload(rest);
+        payload.recipientId = recipientId;
+        return new RolespaceMessage(await this.post('/dm', payload));
+    }
+
+    // ---- Interaction polling ─────────────────────────────────────────────
+    /**
+     * Async iterator over interactions. Yields RolespaceInteraction instances.
      *
      *   for await (const ix of rs.interactions()) {
-     *       await rs.respond(ix.id, { type: 'message', content: 'hi', ephemeral: true });
+     *       if (ix.customId === 'book') {
+     *           await rs.respond(ix.id, { type: 'message', content: `Hi ${ix.user.displayName}!` });
+     *       }
      *   }
      *
      * @param {object} [opts]
-     * @param {number} [opts.idleDelayMs=1000]  - Wait between empty polls.
-     * @param {AbortSignal} [opts.signal]       - Optional cancellation.
+     * @param {number} [opts.idleDelayMs=1000]
+     * @param {AbortSignal} [opts.signal]
      */
     async *interactions(opts) {
         opts = opts || {};
@@ -145,31 +414,18 @@ class Rolespace {
         while (!(opts.signal && opts.signal.aborted)) {
             const page = await this.get(`/interactions?after=${after}`);
             const data = (page && page.data) || [];
-            for (const ix of data) yield ix;
+            for (const ix of data) yield new RolespaceInteraction(ix);
             if (page && typeof page.lastId === 'number') after = page.lastId;
             if (data.length === 0) await new Promise(r => setTimeout(r, idle));
         }
     }
 
-    /** Respond to an interaction. `reply` is one of: { type: 'message' | 'update' | 'modal' | 'ack', ... }. */
+    /** Respond to an interaction. `reply` is { type: 'message'|'update'|'modal'|'ack', ... }. */
     respond(interactionId, reply) {
         return this.post(`/interactions/${interactionId}/callback`, reply);
     }
 
-    // ---- Webhook signature verification ----
-    /**
-     * Verify an X-Rolespace-Signature header against a raw request body.
-     *
-     * IMPORTANT: pass the RAW body buffer/string, NOT the parsed JSON. If your
-     * server parsed the JSON first the byte order changed and the signature
-     * will never match. With Express, use `app.use(express.raw({ type: '*\/*' }))`
-     * on the webhook route.
-     *
-     * @param {Buffer|string} rawBody
-     * @param {string} signatureHeader  - Value of X-Rolespace-Signature (e.g. "sha256=abc...")
-     * @param {string} secret           - Shared signing secret you got when you registered the webhook.
-     * @returns {boolean}
-     */
+    // ---- Webhook signature verification ──────────────────────────────────
     static verifyWebhook(rawBody, signatureHeader, secret) {
         if (!rawBody || !signatureHeader || !secret) return false;
         const expected = 'sha256=' + crypto.createHmac('sha256', secret)
@@ -181,10 +437,59 @@ class Rolespace {
     }
 }
 
-// Don't leak the bot token through stringification (e.g. when a logger
-// reaches for the client object).
+// Don't leak the bot token through stringification.
 Object.defineProperty(Rolespace.prototype, 'toJSON', {
     value() { return { baseUrl: this._baseUrl, token: '[redacted]' }; },
 });
 
-module.exports = { Rolespace, RolespaceError };
+// ═════════════════════════ helpers ═════════════════════════════════════
+
+/** Unwrap { data: [...] } responses; pass through bare arrays. */
+function _unwrapList(resp) {
+    if (Array.isArray(resp)) return resp;
+    if (resp && Array.isArray(resp.data)) return resp.data;
+    return [];
+}
+
+/**
+ * Build a message-shaped payload from the variadic tail of sendMessage / sendDM.
+ * Accepts: ["text"], ["text", embed, ...], [embed], [embed, embed], [{content, embeds, ...}].
+ */
+function _buildMessagePayload(rest) {
+    if (rest.length === 0) return { content: '' };
+
+    // Single object payload — anything not a string and not a RolespaceEmbed.
+    if (rest.length === 1) {
+        const arg = rest[0];
+        if (typeof arg === 'string') return { content: arg };
+        if (arg instanceof RolespaceEmbed) return { content: '', embeds: [arg.toJSON()] };
+        if (arg && typeof arg === 'object') return arg; // raw payload object
+    }
+
+    // Mixed: string text + N embeds, or N embeds with no text (caller passed embeds directly).
+    let content = '';
+    const embeds = [];
+    for (const arg of rest) {
+        if (typeof arg === 'string') content = arg;
+        else if (arg instanceof RolespaceEmbed) embeds.push(arg.toJSON());
+        else if (arg && typeof arg === 'object') Object.assign({}, arg); // ignore stray objects to keep behavior predictable
+    }
+    return embeds.length > 0 ? { content, embeds } : { content };
+}
+
+module.exports = {
+    Rolespace,
+    RolespaceError,
+    RolespaceEmbed,
+    // Response wrappers exported so callers can `instanceof`-check or extend.
+    RolespaceObject,
+    RolespaceMe,
+    RolespaceUser,
+    RolespaceMember,
+    RolespaceServer,
+    RolespaceCategory,
+    RolespaceChannel,
+    RolespaceRole,
+    RolespaceMessage,
+    RolespaceInteraction,
+};

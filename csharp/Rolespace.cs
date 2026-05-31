@@ -182,6 +182,32 @@ public sealed class RolespaceClient : IDisposable
         => new(await PostAsync($"/servers/{serverId}/channels/{channelId}/messages",
             new { content = text }, ct).ConfigureAwait(false));
 
+    /// <summary>Send text plus one or more embeds (rich cards). The text is optional — pass <c>""</c> for embeds-only.</summary>
+    /// <example>
+    /// <code>
+    /// var card = new RolespaceEmbed()
+    ///     .WithTitle("Patch 2.4")
+    ///     .WithColor("#5f85f7")
+    ///     .AddField("Author", "@lynn", inline: true);
+    /// await rs.SendMessageAsync(serverId, channelId, "Heads up:", card);
+    /// </code>
+    /// </example>
+    public async Task<RolespaceMessage> SendMessageAsync(long serverId, long channelId, string text, params RolespaceEmbed[] embeds)
+        => await SendMessageAsync(serverId, channelId, text, embeds, default).ConfigureAwait(false);
+
+    /// <summary>Cancellation-aware overload of the text+embeds variant.</summary>
+    public async Task<RolespaceMessage> SendMessageAsync(long serverId, long channelId, string text, RolespaceEmbed[] embeds, CancellationToken ct)
+    {
+        object payload = embeds is { Length: > 0 }
+            ? new { content = text, embeds }
+            : new { content = text };
+        return new(await PostAsync($"/servers/{serverId}/channels/{channelId}/messages", payload, ct).ConfigureAwait(false));
+    }
+
+    /// <summary>Send a single embed with no message text.</summary>
+    public Task<RolespaceMessage> SendMessageAsync(long serverId, long channelId, RolespaceEmbed embed, CancellationToken ct = default)
+        => SendMessageAsync(serverId, channelId, "", new[] { embed }, ct);
+
     /// <summary>Send a richer message — pass an anonymous object with content/embeds/components/replyToMessageId.</summary>
     public async Task<RolespaceMessage> SendMessageAsync(long serverId, long channelId, object payload, CancellationToken ct = default)
         => new(await PostAsync($"/servers/{serverId}/channels/{channelId}/messages",
@@ -194,6 +220,15 @@ public sealed class RolespaceClient : IDisposable
     /// <summary>Send a direct message to a user.</summary>
     public async Task<RolespaceMessage> SendDmAsync(long recipientId, string text, CancellationToken ct = default)
         => new(await PostAsync("/dm", new { recipientId, content = text }, ct).ConfigureAwait(false));
+
+    /// <summary>Send a DM with embeds (rich cards). Text may be empty.</summary>
+    public async Task<RolespaceMessage> SendDmAsync(long recipientId, string text, params RolespaceEmbed[] embeds)
+    {
+        object payload = embeds is { Length: > 0 }
+            ? new { recipientId, content = text, embeds }
+            : new { recipientId, content = text };
+        return new(await PostAsync("/dm", payload).ConfigureAwait(false));
+    }
 
     // ---- Interaction polling ──────────────────────────────────────────────
     /// <summary>

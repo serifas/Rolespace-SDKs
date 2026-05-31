@@ -1,6 +1,6 @@
 [project]
 name = "rolespace"
-version = "0.1.0"
+version = "0.2.0"
 description = "Official Rolespace bot SDK for Python"
 readme = "README.md"
 license = { file = "LICENSE" }
