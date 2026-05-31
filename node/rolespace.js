@@ -380,6 +380,258 @@ class Rolespace {
         return new RolespaceMessage(await this.get(`/servers/${serverId}/channels/${channelId}/messages/${messageId}`));
     }
 
+    /** Recent messages, oldest → newest. Pass `before` (a message id) to page backwards. */
+    async listMessages(serverId, channelId, opts) {
+        opts = opts || {};
+        const limit = opts.limit || 50;
+        let url = `/servers/${serverId}/channels/${channelId}/messages?limit=${limit}`;
+        if (opts.before) url += `&before=${encodeURIComponent(opts.before)}`;
+        const resp = await this.get(url);
+        return _unwrapList(resp).map(m => new RolespaceMessage(m));
+    }
+
+    /** Edit the bot's own message. Returns the updated message. */
+    async editMessage(serverId, channelId, messageId, newContent) {
+        return new RolespaceMessage(await this.patch(
+            `/servers/${serverId}/channels/${channelId}/messages/${messageId}`,
+            { content: newContent }));
+    }
+
+    /** Delete a message (own message OR any with ManageMessages). */
+    deleteMessage(serverId, channelId, messageId) {
+        return this.del(`/servers/${serverId}/channels/${channelId}/messages/${messageId}`);
+    }
+
+    /** Pin a message. Requires ManageMessages. */
+    pinMessage(serverId, channelId, messageId) {
+        return this.put(`/servers/${serverId}/channels/${channelId}/messages/${messageId}/pin`);
+    }
+
+    /** Unpin a message. Requires ManageMessages. */
+    unpinMessage(serverId, channelId, messageId) {
+        return this.del(`/servers/${serverId}/channels/${channelId}/messages/${messageId}/pin`);
+    }
+
+    /** React to a message. Emoji is URL-encoded automatically. */
+    addReaction(serverId, channelId, messageId, emoji) {
+        return this.put(`/servers/${serverId}/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`);
+    }
+
+    /** Remove the bot's own reaction. */
+    removeReaction(serverId, channelId, messageId, emoji) {
+        return this.del(`/servers/${serverId}/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`);
+    }
+
+    // ---- Channel + category management ─────────────────────────────────────
+
+    /**
+     * Create a channel.
+     * @param {object} opts
+     * @param {string} opts.type           text | voice | announcement | forum | rules (default "text")
+     * @param {number} [opts.categoryId]
+     * @param {string} [opts.topic]
+     * @param {boolean} [opts.isPrivate]
+     */
+    async createChannel(serverId, name, opts) {
+        opts = opts || {};
+        return new RolespaceChannel(await this.post(`/servers/${serverId}/channels`, {
+            name,
+            type: opts.type || 'text',
+            categoryId: opts.categoryId,
+            topic: opts.topic,
+            isPrivate: !!opts.isPrivate,
+        }));
+    }
+
+    /** Rename and/or change a channel's topic. Pass null/undefined for fields to leave alone. */
+    updateChannel(serverId, channelId, opts) {
+        opts = opts || {};
+        return this.patch(`/servers/${serverId}/channels/${channelId}`, {
+            name: opts.name, topic: opts.topic,
+        });
+    }
+
+    /** Delete a channel and its contents. Requires ManageChannels. */
+    deleteChannel(serverId, channelId) {
+        return this.del(`/servers/${serverId}/channels/${channelId}`);
+    }
+
+    /** Create a category. Requires ManageChannels. */
+    createCategory(serverId, name) {
+        return this.post(`/servers/${serverId}/categories`, { name });
+    }
+
+    /** Rename a category. */
+    updateCategory(serverId, categoryId, name) {
+        return this.patch(`/servers/${serverId}/categories/${categoryId}`, { name });
+    }
+
+    /** Delete a category. With deleteChannels=true, also deletes every channel inside. */
+    deleteCategory(serverId, categoryId, deleteChannels) {
+        return this.del(`/servers/${serverId}/categories/${categoryId}?deleteChannels=${deleteChannels ? 'true' : 'false'}`);
+    }
+
+    // ---- Member moderation ────────────────────────────────────────────────
+
+    /** Kick a member. Requires KickMembers. */
+    kickMember(serverId, userId, reason) {
+        let url = `/servers/${serverId}/members/${userId}`;
+        if (reason) url += `?reason=${encodeURIComponent(reason)}`;
+        return this.del(url);
+    }
+
+    /** Ban a member. Requires BanMembers. */
+    banMember(serverId, userId, reason) {
+        return this.post(`/servers/${serverId}/members/${userId}/ban`, { reason: reason || null });
+    }
+
+    /** Lift a ban. */
+    unbanMember(serverId, userId) {
+        return this.del(`/servers/${serverId}/members/${userId}/ban`);
+    }
+
+    /** Set or clear a member's server nickname. Pass null/empty to clear. */
+    setNickname(serverId, userId, nickname) {
+        return this.patch(`/servers/${serverId}/members/${userId}/nickname`, { nickname: nickname || null });
+    }
+
+    /** Assign a role to a member. Requires ManageRoles. */
+    assignRole(serverId, userId, roleId) {
+        return this.put(`/servers/${serverId}/members/${userId}/roles/${roleId}`);
+    }
+
+    /** Remove a role from a member. */
+    removeRole(serverId, userId, roleId) {
+        return this.del(`/servers/${serverId}/members/${userId}/roles/${roleId}`);
+    }
+
+    // ---- Forum threads ────────────────────────────────────────────────────
+
+    /** List threads in a forum channel. */
+    async listThreads(serverId, channelId) {
+        const resp = await this.get(`/servers/${serverId}/channels/${channelId}/threads`);
+        return _unwrapList(resp);
+    }
+
+    /** Fetch a thread + its posts. */
+    getThread(serverId, channelId, threadId) {
+        return this.get(`/servers/${serverId}/channels/${channelId}/threads/${threadId}`);
+    }
+
+    /** Start a new thread in a forum channel. */
+    createThread(serverId, channelId, title, content, tags) {
+        return this.post(`/servers/${serverId}/channels/${channelId}/threads`,
+            { title, content, tags: tags ? Array.from(tags) : null });
+    }
+
+    /** Reply in a thread. */
+    replyToThread(serverId, channelId, threadId, content, replyToPostId) {
+        return this.post(`/servers/${serverId}/channels/${channelId}/threads/${threadId}/posts`,
+            { content, replyToPostId: replyToPostId || null });
+    }
+
+    // ---- Streams (read) ───────────────────────────────────────────────────
+
+    /** The bot's own channel status: live, viewers, title, game, HLS URL. */
+    myStream() { return this.get('/streams/me'); }
+
+    /** The current live directory (public). */
+    async liveStreams() { return _unwrapList(await this.get('/streams/live')); }
+
+    /** Public live status for any account. */
+    streamFor(accountId) { return this.get(`/streams/${accountId}`); }
+
+    /** The bot's stream chat moderators. Owner-only. */
+    async streamModerators() { return _unwrapList(await this.get('/streams/me/moderators')); }
+
+    /** The bot's stream chat bans + timeouts. Owner-only. */
+    async streamBans() { return _unwrapList(await this.get('/streams/me/bans')); }
+
+    // ---- Stream moderation ────────────────────────────────────────────────
+
+    /** Promote a chat moderator on the bot's channel. */
+    addStreamModerator(accountId) {
+        return this.post('/streams/me/moderators', { accountId });
+    }
+
+    /** Demote a chat moderator. */
+    removeStreamModerator(accountId) {
+        return this.del(`/streams/me/moderators/${accountId}`);
+    }
+
+    /** Permanently ban a chatter. */
+    banStreamChatter(accountId, reason) {
+        return this.post('/streams/me/bans', { accountId, reason: reason || null });
+    }
+
+    /** Temporarily ban a chatter for `durationSeconds`. */
+    timeoutStreamChatter(accountId, durationSeconds, reason) {
+        return this.post('/streams/me/timeouts', { accountId, durationSeconds, reason: reason || null });
+    }
+
+    /** Lift a ban or timeout. */
+    liftStreamBan(accountId) {
+        return this.del(`/streams/me/bans/${accountId}`);
+    }
+
+    /** Set chat mode (subscribers only, URL allow). */
+    updateStreamChatSettings(allowUrls, subscribersOnly) {
+        return this.patch('/streams/me/chat-settings', { allowUrls, subscribersOnly });
+    }
+
+    // ---- Webhooks (outgoing — event delivery) ─────────────────────────────
+
+    /** List the bot's outgoing (event-delivery) webhooks. */
+    async listOutgoingWebhooks() { return _unwrapList(await this.get('/webhooks/outgoing')); }
+
+    /**
+     * Register an outgoing webhook. Response includes a one-time `secret` — store it.
+     * @param {string} targetType  "server" or "stream"
+     * @param {number} targetId    server id, or bot's own account id for stream target
+     * @param {string} url         public HTTPS endpoint receiving POSTs
+     * @param {string[]} events    e.g. ["message.created"] or ["stream.online", "stream.offline"]
+     */
+    createOutgoingWebhook(targetType, targetId, url, events) {
+        return this.post('/webhooks/outgoing', { targetType, targetId, url, events: Array.from(events) });
+    }
+
+    /** Delete an outgoing webhook. */
+    deleteOutgoingWebhook(webhookId) {
+        return this.del(`/webhooks/outgoing/${webhookId}`);
+    }
+
+    // ---- Webhooks (incoming — post-to-channel URL) ────────────────────────
+
+    /** List the bot's incoming webhooks. */
+    async listIncomingWebhooks() { return _unwrapList(await this.get('/webhooks/incoming')); }
+
+    /** Create an incoming webhook bound to a channel. Response includes the one-time POST URL with its token. */
+    createIncomingWebhook(serverId, channelId, name) {
+        return this.post('/webhooks/incoming', { serverId, channelId, name: name || null });
+    }
+
+    /** Delete an incoming webhook. */
+    deleteIncomingWebhook(webhookId) {
+        return this.del(`/webhooks/incoming/${webhookId}`);
+    }
+
+    /**
+     * Post to an incoming webhook URL — anonymous (no bot token; the URL token is auth).
+     * Static so you can call it without instantiating a Rolespace client:
+     *
+     *   await Rolespace.postIncomingWebhook(url, { content: 'Deploy done!' });
+     */
+    static async postIncomingWebhook(webhookUrl, payload) {
+        try {
+            const r = await fetch(webhookUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            return r.ok;
+        } catch { return false; }
+    }
+
     /**
      * Send a direct message.
      *   sendDM(recipientId, "text")
@@ -423,6 +675,80 @@ class Rolespace {
     /** Respond to an interaction. `reply` is { type: 'message'|'update'|'modal'|'ack', ... }. */
     respond(interactionId, reply) {
         return this.post(`/interactions/${interactionId}/callback`, reply);
+    }
+
+    // ---- Listening for new messages in a channel ───────────────────────────
+    /**
+     * Async iterator that yields new RolespaceMessage objects as they appear in a channel.
+     * Wraps the polling loop, cursor bookkeeping, and graceful error backoff so you can write:
+     *
+     *   for await (const msg of rs.watchMessages(serverId, channelId, { ownAccountId: me.bot.id })) {
+     *       if (msg.content.startsWith('!ping')) {
+     *           await rs.sendMessage(serverId, channelId, 'pong');
+     *       }
+     *   }
+     *
+     * For high-volume / production bots, prefer outgoing webhooks (push) over polling.
+     * Polling is fine for low-traffic channels, dev/testing, or environments where you
+     * can't expose a public HTTP receiver.
+     *
+     * @param {number} serverId
+     * @param {number} channelId
+     * @param {object} [opts]
+     * @param {number} [opts.idleDelayMs=2000]  Wait between polls.
+     * @param {number} [opts.batchSize=50]      Max messages per poll.
+     * @param {string|Date} [opts.since]        Don't yield messages older than this timestamp.
+     *                                          Defaults to "right now" so existing history is skipped.
+     * @param {boolean} [opts.includeOwn=false] Yield messages posted by THIS bot. Default skips them
+     *                                          to avoid common feedback loops.
+     * @param {number|null} [opts.ownAccountId] Required if includeOwn=false — pass `(await rs.me()).bot.id`.
+     * @param {AbortSignal} [opts.signal]       Cancellation.
+     * @param {function} [opts.onError]         Called with an Error on each polling failure.
+     */
+    async *watchMessages(serverId, channelId, opts) {
+        opts = opts || {};
+        const idle = opts.idleDelayMs || 2000;
+        const batchSize = opts.batchSize || 50;
+        let lastSeenTs;
+        if (opts.since) {
+            lastSeenTs = (opts.since instanceof Date) ? opts.since.toISOString() : String(opts.since);
+        } else {
+            // Bootstrap with the most-recent message timestamp (or "now") so we DON'T replay history.
+            try {
+                const seed = await this.get(`/servers/${serverId}/channels/${channelId}/messages?limit=1`);
+                const seedData = (seed && seed.data) || [];
+                lastSeenTs = seedData.length > 0
+                    ? seedData[seedData.length - 1].timestamp
+                    : new Date().toISOString();
+            } catch (err) {
+                if (opts.onError) opts.onError(err);
+                lastSeenTs = new Date().toISOString();
+            }
+        }
+
+        while (!(opts.signal && opts.signal.aborted)) {
+            try {
+                const page = await this.get(`/servers/${serverId}/channels/${channelId}/messages?limit=${batchSize}`);
+                const msgs = (page && page.data) || [];
+                // API returns oldest → newest within the page; iterate in order so we yield in order too.
+                for (const m of msgs) {
+                    if (!m || !m.timestamp || m.timestamp <= lastSeenTs) continue;
+                    if (!opts.includeOwn && opts.ownAccountId
+                        && m.author && Number(m.author.id) === Number(opts.ownAccountId)) {
+                        lastSeenTs = m.timestamp;
+                        continue;
+                    }
+                    yield new RolespaceMessage(m);
+                    lastSeenTs = m.timestamp;
+                }
+            } catch (err) {
+                if (opts.onError) opts.onError(err);
+                // Back off harder on transient failures so we don't hammer a flaky API.
+                await new Promise(r => setTimeout(r, Math.min(30000, idle * 4)));
+                continue;
+            }
+            await new Promise(r => setTimeout(r, idle));
+        }
     }
 
     // ---- Webhook signature verification ──────────────────────────────────

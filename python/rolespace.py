@@ -43,9 +43,15 @@ import hashlib
 import hmac
 import os
 import time
+from datetime import datetime, timezone
 from typing import Any, Iterator, List, Optional, Union
 
 import requests
+
+
+def _utcnow_iso() -> str:
+    """ISO-8601 UTC timestamp used as the initial cursor for watch_messages()."""
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 DEFAULT_BASE = "https://rolespace.net"
@@ -547,9 +553,238 @@ class Rolespace:
             self.post(f"/servers/{server_id}/channels/{channel_id}/messages", payload)
         )
 
+    def list_messages(self, server_id: int, channel_id: int, limit: int = 50,
+                      before: Optional[str] = None) -> List[RolespaceMessage]:
+        """Recent messages, oldest → newest. Pass ``before`` (a message id) to page backwards."""
+        url = f"/servers/{server_id}/channels/{channel_id}/messages?limit={limit}"
+        if before:
+            from urllib.parse import quote
+            url += f"&before={quote(before)}"
+        return [RolespaceMessage(m) for m in _unwrap_list(self.get(url))]
+
     def get_message(self, server_id: int, channel_id: int, message_id: str) -> RolespaceMessage:
         """Fetch a single message by id."""
         return RolespaceMessage(self.get(f"/servers/{server_id}/channels/{channel_id}/messages/{message_id}"))
+
+    def edit_message(self, server_id: int, channel_id: int, message_id: str, new_content: str) -> RolespaceMessage:
+        """Edit the bot's own message. Returns the updated message."""
+        return RolespaceMessage(self.patch(
+            f"/servers/{server_id}/channels/{channel_id}/messages/{message_id}",
+            json={"content": new_content}))
+
+    def delete_message(self, server_id: int, channel_id: int, message_id: str) -> Any:
+        """Delete a message (own message OR any with ManageMessages)."""
+        return self.delete(f"/servers/{server_id}/channels/{channel_id}/messages/{message_id}")
+
+    def pin_message(self, server_id: int, channel_id: int, message_id: str) -> Any:
+        """Pin a message. Requires ManageMessages."""
+        return self.put(f"/servers/{server_id}/channels/{channel_id}/messages/{message_id}/pin")
+
+    def unpin_message(self, server_id: int, channel_id: int, message_id: str) -> Any:
+        """Unpin a message. Requires ManageMessages."""
+        return self.delete(f"/servers/{server_id}/channels/{channel_id}/messages/{message_id}/pin")
+
+    def add_reaction(self, server_id: int, channel_id: int, message_id: str, emoji: str) -> Any:
+        """React to a message. Emoji is URL-encoded automatically."""
+        from urllib.parse import quote
+        return self.put(f"/servers/{server_id}/channels/{channel_id}/messages/{message_id}/reactions/{quote(emoji)}")
+
+    def remove_reaction(self, server_id: int, channel_id: int, message_id: str, emoji: str) -> Any:
+        """Remove the bot's own reaction."""
+        from urllib.parse import quote
+        return self.delete(f"/servers/{server_id}/channels/{channel_id}/messages/{message_id}/reactions/{quote(emoji)}")
+
+    # ---- Channel + category management ─────────────────────────────────────
+
+    def create_channel(self, server_id: int, name: str, type: str = "text",
+                       category_id: Optional[int] = None, topic: Optional[str] = None,
+                       is_private: bool = False) -> RolespaceChannel:
+        """Create a channel. ``type`` is one of: text, voice, announcement, forum, rules."""
+        return RolespaceChannel(self.post(f"/servers/{server_id}/channels", json={
+            "name": name, "type": type, "categoryId": category_id,
+            "topic": topic, "isPrivate": is_private,
+        }))
+
+    def update_channel(self, server_id: int, channel_id: int,
+                       name: Optional[str] = None, topic: Optional[str] = None) -> Any:
+        """Rename and/or change a channel's topic. Pass ``None`` for fields to leave alone."""
+        return self.patch(f"/servers/{server_id}/channels/{channel_id}",
+                          json={"name": name, "topic": topic})
+
+    def delete_channel(self, server_id: int, channel_id: int) -> Any:
+        """Delete a channel and its contents. Requires ManageChannels."""
+        return self.delete(f"/servers/{server_id}/channels/{channel_id}")
+
+    def create_category(self, server_id: int, name: str) -> Any:
+        """Create a category. Requires ManageChannels."""
+        return self.post(f"/servers/{server_id}/categories", json={"name": name})
+
+    def update_category(self, server_id: int, category_id: int, name: str) -> Any:
+        """Rename a category."""
+        return self.patch(f"/servers/{server_id}/categories/{category_id}", json={"name": name})
+
+    def delete_category(self, server_id: int, category_id: int, delete_channels: bool = False) -> Any:
+        """Delete a category. With ``delete_channels=True``, also deletes every channel inside."""
+        suffix = "true" if delete_channels else "false"
+        return self.delete(f"/servers/{server_id}/categories/{category_id}?deleteChannels={suffix}")
+
+    # ---- Member moderation ────────────────────────────────────────────────
+
+    def kick_member(self, server_id: int, user_id: int, reason: Optional[str] = None) -> Any:
+        """Kick a member. Requires KickMembers."""
+        url = f"/servers/{server_id}/members/{user_id}"
+        if reason:
+            from urllib.parse import quote
+            url += f"?reason={quote(reason)}"
+        return self.delete(url)
+
+    def ban_member(self, server_id: int, user_id: int, reason: Optional[str] = None) -> Any:
+        """Ban a member. Requires BanMembers."""
+        return self.post(f"/servers/{server_id}/members/{user_id}/ban", json={"reason": reason})
+
+    def unban_member(self, server_id: int, user_id: int) -> Any:
+        """Lift a ban."""
+        return self.delete(f"/servers/{server_id}/members/{user_id}/ban")
+
+    def set_nickname(self, server_id: int, user_id: int, nickname: Optional[str]) -> Any:
+        """Set or clear a member's server nickname. ``None``/empty clears."""
+        return self.patch(f"/servers/{server_id}/members/{user_id}/nickname",
+                          json={"nickname": nickname})
+
+    def assign_role(self, server_id: int, user_id: int, role_id: int) -> Any:
+        """Assign a role to a member. Requires ManageRoles."""
+        return self.put(f"/servers/{server_id}/members/{user_id}/roles/{role_id}")
+
+    def remove_role(self, server_id: int, user_id: int, role_id: int) -> Any:
+        """Remove a role from a member."""
+        return self.delete(f"/servers/{server_id}/members/{user_id}/roles/{role_id}")
+
+    # ---- Forum threads ────────────────────────────────────────────────────
+
+    def list_threads(self, server_id: int, channel_id: int) -> list:
+        """List threads in a forum channel."""
+        return _unwrap_list(self.get(f"/servers/{server_id}/channels/{channel_id}/threads"))
+
+    def get_thread(self, server_id: int, channel_id: int, thread_id: int) -> dict:
+        """Fetch a thread + its posts."""
+        return self.get(f"/servers/{server_id}/channels/{channel_id}/threads/{thread_id}")
+
+    def create_thread(self, server_id: int, channel_id: int, title: str, content: str,
+                      tags: Optional[List[str]] = None) -> dict:
+        """Start a new thread in a forum channel."""
+        return self.post(f"/servers/{server_id}/channels/{channel_id}/threads",
+                         json={"title": title, "content": content, "tags": list(tags) if tags else None})
+
+    def reply_to_thread(self, server_id: int, channel_id: int, thread_id: int, content: str,
+                        reply_to_post_id: Optional[int] = None) -> dict:
+        """Reply in a thread."""
+        return self.post(
+            f"/servers/{server_id}/channels/{channel_id}/threads/{thread_id}/posts",
+            json={"content": content, "replyToPostId": reply_to_post_id})
+
+    # ---- Streams (read) ───────────────────────────────────────────────────
+
+    def my_stream(self) -> dict:
+        """The bot's own channel status: live, viewers, title, game, HLS URL."""
+        return self.get("/streams/me")
+
+    def live_streams(self) -> list:
+        """The current live directory (public)."""
+        return _unwrap_list(self.get("/streams/live"))
+
+    def stream_for(self, account_id: int) -> dict:
+        """Public live status for any account."""
+        return self.get(f"/streams/{account_id}")
+
+    def stream_moderators(self) -> list:
+        """The bot's stream chat moderators. Owner-only."""
+        return _unwrap_list(self.get("/streams/me/moderators"))
+
+    def stream_bans(self) -> list:
+        """The bot's stream chat bans + timeouts. Owner-only."""
+        return _unwrap_list(self.get("/streams/me/bans"))
+
+    # ---- Stream moderation ────────────────────────────────────────────────
+
+    def add_stream_moderator(self, account_id: int) -> Any:
+        """Promote a chat moderator on the bot's channel."""
+        return self.post("/streams/me/moderators", json={"accountId": account_id})
+
+    def remove_stream_moderator(self, account_id: int) -> Any:
+        """Demote a chat moderator."""
+        return self.delete(f"/streams/me/moderators/{account_id}")
+
+    def ban_stream_chatter(self, account_id: int, reason: Optional[str] = None) -> Any:
+        """Permanently ban a chatter."""
+        return self.post("/streams/me/bans", json={"accountId": account_id, "reason": reason})
+
+    def timeout_stream_chatter(self, account_id: int, duration_seconds: int,
+                               reason: Optional[str] = None) -> Any:
+        """Temporarily ban a chatter for ``duration_seconds``."""
+        return self.post("/streams/me/timeouts",
+                         json={"accountId": account_id, "durationSeconds": duration_seconds, "reason": reason})
+
+    def lift_stream_ban(self, account_id: int) -> Any:
+        """Lift a ban or timeout."""
+        return self.delete(f"/streams/me/bans/{account_id}")
+
+    def update_stream_chat_settings(self, allow_urls: bool, subscribers_only: bool) -> Any:
+        """Set chat mode (subscribers only, URL allow)."""
+        return self.patch("/streams/me/chat-settings",
+                          json={"allowUrls": allow_urls, "subscribersOnly": subscribers_only})
+
+    # ---- Webhooks (outgoing — event delivery) ─────────────────────────────
+
+    def list_outgoing_webhooks(self) -> list:
+        """List the bot's outgoing (event-delivery) webhooks."""
+        return _unwrap_list(self.get("/webhooks/outgoing"))
+
+    def create_outgoing_webhook(self, target_type: str, target_id: int, url: str,
+                                events: List[str]) -> dict:
+        """Register an outgoing webhook. The response includes a one-time ``secret`` — store it.
+
+        ``target_type`` is ``"server"`` or ``"stream"``. ``target_id`` is the server id (for
+        "server") or the bot's own account id (for "stream"). ``events`` is a list of names
+        like ``["message.created"]`` or ``["stream.online", "stream.offline"]``.
+        """
+        return self.post("/webhooks/outgoing", json={
+            "targetType": target_type, "targetId": target_id, "url": url, "events": list(events),
+        })
+
+    def delete_outgoing_webhook(self, webhook_id: int) -> Any:
+        """Delete an outgoing webhook."""
+        return self.delete(f"/webhooks/outgoing/{webhook_id}")
+
+    # ---- Webhooks (incoming — post-to-channel URL) ────────────────────────
+
+    def list_incoming_webhooks(self) -> list:
+        """List the bot's incoming webhooks."""
+        return _unwrap_list(self.get("/webhooks/incoming"))
+
+    def create_incoming_webhook(self, server_id: int, channel_id: int,
+                                name: Optional[str] = None) -> dict:
+        """Create an incoming webhook bound to a channel. Response includes the one-time POST URL with its token."""
+        return self.post("/webhooks/incoming", json={
+            "serverId": server_id, "channelId": channel_id, "name": name,
+        })
+
+    def delete_incoming_webhook(self, webhook_id: int) -> Any:
+        """Delete an incoming webhook."""
+        return self.delete(f"/webhooks/incoming/{webhook_id}")
+
+    @staticmethod
+    def post_incoming_webhook(webhook_url: str, payload: dict) -> bool:
+        """Post to an incoming webhook URL — anonymous (no bot token; the URL token is auth).
+
+        Static so you can call it without instantiating a client::
+
+            Rolespace.post_incoming_webhook(url, {"content": "Deploy done!"})
+        """
+        try:
+            r = requests.post(webhook_url, json=payload, timeout=15)
+            return r.ok
+        except requests.RequestException:
+            return False
 
     def send_dm(
         self,
@@ -588,6 +823,86 @@ class Rolespace:
     def respond(self, interaction_id: int, reply: dict) -> Any:
         """Respond to an interaction. ``reply`` is ``{"type": "message"|"update"|"modal"|"ack", ...}``."""
         return self.post(f"/interactions/{interaction_id}/callback", reply)
+
+    # ---- Listening for new messages in a channel ─────────────────────────
+    def watch_messages(
+        self,
+        server_id: int,
+        channel_id: int,
+        idle_delay: float = 2.0,
+        batch_size: int = 50,
+        since: Optional[str] = None,
+        include_own: bool = False,
+        own_account_id: Optional[int] = None,
+        on_error: Optional[Any] = None,
+    ) -> Iterator[RolespaceMessage]:
+        """Yield new ``RolespaceMessage`` objects from a channel as they appear.
+
+        Wraps the polling loop, cursor bookkeeping, and graceful error backoff::
+
+            me = rs.me()
+            for msg in rs.watch_messages(server_id, channel_id, own_account_id=me.bot.id):
+                if msg.content.startswith("!ping"):
+                    rs.send_message(server_id, channel_id, "pong")
+
+        For high-volume / production bots, prefer outgoing webhooks (push) over polling.
+        Polling is fine for low-traffic channels, dev/testing, or environments where you
+        can't expose a public HTTP receiver.
+
+        Parameters
+        ----------
+        server_id, channel_id : int
+        idle_delay : float
+            Seconds between polls. Defaults to 2.
+        batch_size : int
+            Max messages per poll. Defaults to 50.
+        since : str
+            ISO-8601 timestamp; only yield messages newer than this. Defaults to "now"
+            so existing channel history is skipped.
+        include_own : bool
+            When False (default), messages posted by THIS bot are filtered out. Avoids
+            common reply-loop bugs.
+        own_account_id : int
+            Required when include_own is False. Usually ``rs.me().bot.id``.
+        on_error : callable(exc)
+            Called on each polling failure. Defaults to swallowing silently.
+        """
+        # Bootstrap the cursor: skip everything that's already in the channel.
+        if since is not None:
+            last_seen_ts = since
+        else:
+            try:
+                seed = self.get(f"/servers/{server_id}/channels/{channel_id}/messages?limit=1")
+                seed_data = (seed or {}).get("data") or []
+                last_seen_ts = seed_data[-1]["timestamp"] if seed_data else _utcnow_iso()
+            except Exception as ex:
+                if on_error:
+                    on_error(ex)
+                last_seen_ts = _utcnow_iso()
+
+        while True:
+            try:
+                page = self.get(f"/servers/{server_id}/channels/{channel_id}/messages?limit={batch_size}")
+                msgs = (page or {}).get("data") or []
+                # API returns oldest → newest; iterate in order.
+                for m in msgs:
+                    ts = m.get("timestamp")
+                    if not ts or ts <= last_seen_ts:
+                        continue
+                    if (not include_own
+                            and own_account_id is not None
+                            and (m.get("author") or {}).get("id") == own_account_id):
+                        last_seen_ts = ts
+                        continue
+                    yield RolespaceMessage(m)
+                    last_seen_ts = ts
+            except Exception as ex:
+                if on_error:
+                    on_error(ex)
+                # Back off harder on transient failures so we don't hammer a flaky API.
+                time.sleep(min(30.0, idle_delay * 4))
+                continue
+            time.sleep(idle_delay)
 
     # ---- Webhook signature verification ──────────────────────────────────
 

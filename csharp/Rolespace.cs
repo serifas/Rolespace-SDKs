@@ -24,6 +24,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -213,9 +214,215 @@ public sealed class RolespaceClient : IDisposable
         => new(await PostAsync($"/servers/{serverId}/channels/{channelId}/messages",
             payload, ct).ConfigureAwait(false));
 
+    /// <summary>List recent messages, oldest → newest. <paramref name="before"/> pages backwards.</summary>
+    public async Task<List<RolespaceMessage>> ListMessagesAsync(long serverId, long channelId,
+        int limit = 50, string? before = null, CancellationToken ct = default)
+    {
+        var url = $"/servers/{serverId}/channels/{channelId}/messages?limit={limit}"
+                  + (before != null ? $"&before={Uri.EscapeDataString(before)}" : "");
+        return await GetListAsync(url, el => new RolespaceMessage(el), ct).ConfigureAwait(false);
+    }
+
     /// <summary>Fetch a single message by id.</summary>
     public async Task<RolespaceMessage> GetMessageAsync(long serverId, long channelId, string messageId, CancellationToken ct = default)
         => new(await GetAsync($"/servers/{serverId}/channels/{channelId}/messages/{messageId}", ct).ConfigureAwait(false));
+
+    /// <summary>Edit the bot's own message. Returns the updated message.</summary>
+    public async Task<RolespaceMessage> EditMessageAsync(long serverId, long channelId, string messageId, string newContent, CancellationToken ct = default)
+        => new(await PatchAsync($"/servers/{serverId}/channels/{channelId}/messages/{messageId}",
+            new { content = newContent }, ct).ConfigureAwait(false));
+
+    /// <summary>Delete a message (own message OR any with ManageMessages).</summary>
+    public Task<JsonElement> DeleteMessageAsync(long serverId, long channelId, string messageId, CancellationToken ct = default)
+        => DeleteAsync($"/servers/{serverId}/channels/{channelId}/messages/{messageId}", ct);
+
+    /// <summary>Pin a message. Requires ManageMessages.</summary>
+    public Task<JsonElement> PinMessageAsync(long serverId, long channelId, string messageId, CancellationToken ct = default)
+        => PutAsync($"/servers/{serverId}/channels/{channelId}/messages/{messageId}/pin", null, ct);
+
+    /// <summary>Unpin a message. Requires ManageMessages.</summary>
+    public Task<JsonElement> UnpinMessageAsync(long serverId, long channelId, string messageId, CancellationToken ct = default)
+        => DeleteAsync($"/servers/{serverId}/channels/{channelId}/messages/{messageId}/pin", ct);
+
+    /// <summary>React to a message. Emoji is automatically URL-encoded.</summary>
+    public Task<JsonElement> AddReactionAsync(long serverId, long channelId, string messageId, string emoji, CancellationToken ct = default)
+        => PutAsync($"/servers/{serverId}/channels/{channelId}/messages/{messageId}/reactions/{Uri.EscapeDataString(emoji)}", null, ct);
+
+    /// <summary>Remove the bot's own reaction.</summary>
+    public Task<JsonElement> RemoveReactionAsync(long serverId, long channelId, string messageId, string emoji, CancellationToken ct = default)
+        => DeleteAsync($"/servers/{serverId}/channels/{channelId}/messages/{messageId}/reactions/{Uri.EscapeDataString(emoji)}", ct);
+
+    // ---- Channel + category management ─────────────────────────────────────
+
+    /// <summary>Create a channel. <paramref name="type"/> is one of: text, voice, announcement, forum, rules.</summary>
+    public async Task<RolespaceChannel> CreateChannelAsync(long serverId, string name, string type = "text",
+        long? categoryId = null, string? topic = null, bool isPrivate = false, CancellationToken ct = default)
+        => new(await PostAsync($"/servers/{serverId}/channels",
+            new { name, type, categoryId, topic, isPrivate }, ct).ConfigureAwait(false));
+
+    /// <summary>Rename and/or change a channel's topic. Pass null for fields you don't want to touch.</summary>
+    public Task<JsonElement> UpdateChannelAsync(long serverId, long channelId, string? name = null, string? topic = null, CancellationToken ct = default)
+        => PatchAsync($"/servers/{serverId}/channels/{channelId}", new { name, topic }, ct);
+
+    /// <summary>Delete a channel and its contents. Requires ManageChannels.</summary>
+    public Task<JsonElement> DeleteChannelAsync(long serverId, long channelId, CancellationToken ct = default)
+        => DeleteAsync($"/servers/{serverId}/channels/{channelId}", ct);
+
+    /// <summary>Create a category. Requires ManageChannels.</summary>
+    public Task<JsonElement> CreateCategoryAsync(long serverId, string name, CancellationToken ct = default)
+        => PostAsync($"/servers/{serverId}/categories", new { name }, ct);
+
+    /// <summary>Rename a category. Requires ManageChannels.</summary>
+    public Task<JsonElement> UpdateCategoryAsync(long serverId, long categoryId, string name, CancellationToken ct = default)
+        => PatchAsync($"/servers/{serverId}/categories/{categoryId}", new { name }, ct);
+
+    /// <summary>Delete a category. With <paramref name="deleteChannels"/>=true, also deletes every channel inside it.</summary>
+    public Task<JsonElement> DeleteCategoryAsync(long serverId, long categoryId, bool deleteChannels = false, CancellationToken ct = default)
+        => DeleteAsync($"/servers/{serverId}/categories/{categoryId}?deleteChannels={(deleteChannels ? "true" : "false")}", ct);
+
+    // ---- Member moderation ────────────────────────────────────────────────
+
+    /// <summary>Kick a member. Requires the bot's KickMembers permission.</summary>
+    public Task<JsonElement> KickMemberAsync(long serverId, long userId, string? reason = null, CancellationToken ct = default)
+    {
+        var url = $"/servers/{serverId}/members/{userId}";
+        if (!string.IsNullOrEmpty(reason)) url += "?reason=" + Uri.EscapeDataString(reason);
+        return DeleteAsync(url, ct);
+    }
+
+    /// <summary>Ban a member. Requires BanMembers.</summary>
+    public Task<JsonElement> BanMemberAsync(long serverId, long userId, string? reason = null, CancellationToken ct = default)
+        => PostAsync($"/servers/{serverId}/members/{userId}/ban", new { reason }, ct);
+
+    /// <summary>Lift a ban.</summary>
+    public Task<JsonElement> UnbanMemberAsync(long serverId, long userId, CancellationToken ct = default)
+        => DeleteAsync($"/servers/{serverId}/members/{userId}/ban", ct);
+
+    /// <summary>Set or clear a member's server nickname. Pass null/empty to clear.</summary>
+    public Task<JsonElement> SetNicknameAsync(long serverId, long userId, string? nickname, CancellationToken ct = default)
+        => PatchAsync($"/servers/{serverId}/members/{userId}/nickname", new { nickname }, ct);
+
+    /// <summary>Assign a role to a member. Requires ManageRoles.</summary>
+    public Task<JsonElement> AssignRoleAsync(long serverId, long userId, long roleId, CancellationToken ct = default)
+        => PutAsync($"/servers/{serverId}/members/{userId}/roles/{roleId}", null, ct);
+
+    /// <summary>Remove a role from a member.</summary>
+    public Task<JsonElement> RemoveRoleAsync(long serverId, long userId, long roleId, CancellationToken ct = default)
+        => DeleteAsync($"/servers/{serverId}/members/{userId}/roles/{roleId}", ct);
+
+    // ---- Forum threads ────────────────────────────────────────────────────
+
+    /// <summary>List threads in a forum channel.</summary>
+    public Task<List<JsonElement>> ListThreadsAsync(long serverId, long channelId, CancellationToken ct = default)
+        => GetListAsync($"/servers/{serverId}/channels/{channelId}/threads", el => el, ct);
+
+    /// <summary>Fetch a thread + its posts.</summary>
+    public Task<JsonElement> GetThreadAsync(long serverId, long channelId, long threadId, CancellationToken ct = default)
+        => GetAsync($"/servers/{serverId}/channels/{channelId}/threads/{threadId}", ct);
+
+    /// <summary>Start a new thread in a forum channel.</summary>
+    public Task<JsonElement> CreateThreadAsync(long serverId, long channelId, string title, string content,
+        IEnumerable<string>? tags = null, CancellationToken ct = default)
+        => PostAsync($"/servers/{serverId}/channels/{channelId}/threads",
+            new { title, content, tags = tags?.ToArray() }, ct);
+
+    /// <summary>Reply in a thread.</summary>
+    public Task<JsonElement> ReplyToThreadAsync(long serverId, long channelId, long threadId, string content,
+        long? replyToPostId = null, CancellationToken ct = default)
+        => PostAsync($"/servers/{serverId}/channels/{channelId}/threads/{threadId}/posts",
+            new { content, replyToPostId }, ct);
+
+    // ---- Streams (read) ───────────────────────────────────────────────────
+
+    /// <summary>The bot's own channel status: live, viewers, title, game, HLS URL.</summary>
+    public Task<JsonElement> MyStreamAsync(CancellationToken ct = default) => GetAsync("/streams/me", ct);
+
+    /// <summary>The current live directory (public).</summary>
+    public Task<List<JsonElement>> LiveStreamsAsync(CancellationToken ct = default)
+        => GetListAsync("/streams/live", el => el, ct);
+
+    /// <summary>Public live status for any account.</summary>
+    public Task<JsonElement> StreamForAsync(long accountId, CancellationToken ct = default)
+        => GetAsync($"/streams/{accountId}", ct);
+
+    /// <summary>The bot's stream chat moderators. Owner-only.</summary>
+    public Task<List<JsonElement>> StreamModeratorsAsync(CancellationToken ct = default)
+        => GetListAsync("/streams/me/moderators", el => el, ct);
+
+    /// <summary>The bot's stream chat bans + timeouts. Owner-only.</summary>
+    public Task<List<JsonElement>> StreamBansAsync(CancellationToken ct = default)
+        => GetListAsync("/streams/me/bans", el => el, ct);
+
+    // ---- Stream moderation ────────────────────────────────────────────────
+
+    /// <summary>Promote a chat moderator on the bot's channel.</summary>
+    public Task<JsonElement> AddStreamModeratorAsync(long accountId, CancellationToken ct = default)
+        => PostAsync("/streams/me/moderators", new { accountId }, ct);
+
+    /// <summary>Demote a chat moderator.</summary>
+    public Task<JsonElement> RemoveStreamModeratorAsync(long accountId, CancellationToken ct = default)
+        => DeleteAsync($"/streams/me/moderators/{accountId}", ct);
+
+    /// <summary>Permanently ban a chatter.</summary>
+    public Task<JsonElement> BanStreamChatterAsync(long accountId, string? reason = null, CancellationToken ct = default)
+        => PostAsync("/streams/me/bans", new { accountId, reason }, ct);
+
+    /// <summary>Temporarily ban a chatter for <paramref name="durationSeconds"/>.</summary>
+    public Task<JsonElement> TimeoutStreamChatterAsync(long accountId, int durationSeconds, string? reason = null, CancellationToken ct = default)
+        => PostAsync("/streams/me/timeouts", new { accountId, durationSeconds, reason }, ct);
+
+    /// <summary>Lift a ban or timeout.</summary>
+    public Task<JsonElement> LiftStreamBanAsync(long accountId, CancellationToken ct = default)
+        => DeleteAsync($"/streams/me/bans/{accountId}", ct);
+
+    /// <summary>Set chat mode (subscribers only, URL allow).</summary>
+    public Task<JsonElement> UpdateStreamChatSettingsAsync(bool allowUrls, bool subscribersOnly, CancellationToken ct = default)
+        => PatchAsync("/streams/me/chat-settings", new { allowUrls, subscribersOnly }, ct);
+
+    // ---- Webhooks (outgoing — event delivery) ─────────────────────────────
+
+    /// <summary>List the bot's outgoing (event-delivery) webhooks.</summary>
+    public Task<List<JsonElement>> ListOutgoingWebhooksAsync(CancellationToken ct = default)
+        => GetListAsync("/webhooks/outgoing", el => el, ct);
+
+    /// <summary>Register an outgoing webhook. The returned object includes a one-time <c>secret</c> — store it.</summary>
+    /// <param name="targetType">"server" or "stream".</param>
+    /// <param name="targetId">Server id (for "server") or the bot's own account id (for "stream").</param>
+    /// <param name="url">Public HTTPS endpoint that will receive POSTs.</param>
+    /// <param name="events">List of event names (e.g. "message.created", "stream.online").</param>
+    public Task<JsonElement> CreateOutgoingWebhookAsync(string targetType, long targetId, string url,
+        IEnumerable<string> events, CancellationToken ct = default)
+        => PostAsync("/webhooks/outgoing", new { targetType, targetId, url, events = events.ToArray() }, ct);
+
+    /// <summary>Delete an outgoing webhook.</summary>
+    public Task<JsonElement> DeleteOutgoingWebhookAsync(long webhookId, CancellationToken ct = default)
+        => DeleteAsync($"/webhooks/outgoing/{webhookId}", ct);
+
+    // ---- Webhooks (incoming — post-to-channel URL) ────────────────────────
+
+    /// <summary>List the bot's incoming webhooks.</summary>
+    public Task<List<JsonElement>> ListIncomingWebhooksAsync(CancellationToken ct = default)
+        => GetListAsync("/webhooks/incoming", el => el, ct);
+
+    /// <summary>Create an incoming webhook bound to a channel. Response includes the one-time POST URL with its token.</summary>
+    public Task<JsonElement> CreateIncomingWebhookAsync(long serverId, long channelId, string? name = null, CancellationToken ct = default)
+        => PostAsync("/webhooks/incoming", new { serverId, channelId, name }, ct);
+
+    /// <summary>Delete an incoming webhook.</summary>
+    public Task<JsonElement> DeleteIncomingWebhookAsync(long webhookId, CancellationToken ct = default)
+        => DeleteAsync($"/webhooks/incoming/{webhookId}", ct);
+
+    /// <summary>
+    /// Post to an incoming webhook URL — anonymous (no bot token needed; the URL token IS the auth).
+    /// Static so you can call it without instantiating a <see cref="RolespaceClient"/>:
+    /// <code>await RolespaceClient.PostIncomingWebhookAsync(url, new { content = "Deploy done!" });</code>
+    /// </summary>
+    public static async Task<bool> PostIncomingWebhookAsync(string webhookUrl, object payload, CancellationToken ct = default)
+    {
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+        using var resp = await http.PostAsJsonAsync(webhookUrl, payload, JsonOpts, ct).ConfigureAwait(false);
+        return resp.IsSuccessStatusCode;
+    }
 
     /// <summary>Send a direct message to a user.</summary>
     public async Task<RolespaceMessage> SendDmAsync(long recipientId, string text, CancellationToken ct = default)
@@ -268,6 +475,119 @@ public sealed class RolespaceClient : IDisposable
     /// Response shape varies by reply type, so this stays raw JsonElement.</summary>
     public Task<JsonElement> RespondAsync(long interactionId, object reply, CancellationToken ct = default)
         => PostAsync($"/interactions/{interactionId}/callback", reply, ct);
+
+    // ---- Listening for new messages in a channel ───────────────────────────
+    /// <summary>
+    /// Async stream that yields new <see cref="RolespaceMessage"/> objects as they appear
+    /// in a channel. Wraps the polling loop, cursor bookkeeping, and graceful error backoff:
+    /// <code>
+    /// var me = await rs.MeAsync();
+    /// await foreach (var msg in rs.WatchMessagesAsync(serverId, channelId, ownAccountId: me.Bot.Id))
+    /// {
+    ///     if (msg.Content.StartsWith("!ping"))
+    ///         await rs.SendMessageAsync(serverId, channelId, "pong");
+    /// }
+    /// </code>
+    /// For high-volume / production bots, prefer outgoing webhooks (push) over polling.
+    /// Polling is fine for low-traffic channels, dev/testing, or environments where you
+    /// can't expose a public HTTP receiver.
+    /// </summary>
+    /// <param name="serverId">Server containing the channel.</param>
+    /// <param name="channelId">Channel to watch.</param>
+    /// <param name="idleDelayMs">Wait between polls (default 2000).</param>
+    /// <param name="batchSize">Max messages per poll (default 50).</param>
+    /// <param name="since">Only yield messages newer than this. Defaults to "now" so existing history is skipped.</param>
+    /// <param name="includeOwn">When false (default), messages posted by THIS bot are filtered out.</param>
+    /// <param name="ownAccountId">Required when includeOwn is false — pass <c>(await rs.MeAsync()).Bot.Id</c>.</param>
+    /// <param name="onError">Optional callback invoked on each polling failure. Default is silent.</param>
+    /// <param name="ct">Cancellation token — use this to stop the iterator.</param>
+    public async IAsyncEnumerable<RolespaceMessage> WatchMessagesAsync(
+        long serverId, long channelId,
+        int idleDelayMs = 2000,
+        int batchSize = 50,
+        DateTime? since = null,
+        bool includeOwn = false,
+        long? ownAccountId = null,
+        Action<Exception>? onError = null,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        // Bootstrap the cursor so we skip everything that's already in the channel.
+        DateTime lastSeen;
+        if (since.HasValue)
+        {
+            lastSeen = since.Value.ToUniversalTime();
+        }
+        else
+        {
+            lastSeen = DateTime.UtcNow;
+            try
+            {
+                var seed = await GetAsync($"/servers/{serverId}/channels/{channelId}/messages?limit=1", ct).ConfigureAwait(false);
+                if (seed.ValueKind == JsonValueKind.Object
+                    && seed.TryGetProperty("data", out var seedData)
+                    && seedData.ValueKind == JsonValueKind.Array
+                    && seedData.GetArrayLength() > 0)
+                {
+                    var lastEl = seedData[seedData.GetArrayLength() - 1];
+                    if (lastEl.TryGetProperty("timestamp", out var tsEl) && tsEl.ValueKind == JsonValueKind.String
+                        && tsEl.TryGetDateTime(out var ts))
+                    {
+                        lastSeen = ts.ToUniversalTime();
+                    }
+                }
+            }
+            catch (Exception ex) { onError?.Invoke(ex); }
+        }
+
+        while (!ct.IsCancellationRequested)
+        {
+            JsonElement? page = null;
+            try
+            {
+                page = await GetAsync($"/servers/{serverId}/channels/{channelId}/messages?limit={batchSize}", ct).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                onError?.Invoke(ex);
+                // Back off harder on transient failures so we don't hammer a flaky API.
+                try { await Task.Delay(Math.Min(30000, idleDelayMs * 4), ct).ConfigureAwait(false); }
+                catch (OperationCanceledException) { yield break; }
+                continue;
+            }
+
+            if (page is JsonElement p
+                && p.ValueKind == JsonValueKind.Object
+                && p.TryGetProperty("data", out var data)
+                && data.ValueKind == JsonValueKind.Array)
+            {
+                // API returns oldest → newest within the page; iterate in order so we yield in order too.
+                foreach (var m in data.EnumerateArray())
+                {
+                    if (!m.TryGetProperty("timestamp", out var tsEl) || tsEl.ValueKind != JsonValueKind.String) continue;
+                    if (!tsEl.TryGetDateTime(out var ts)) continue;
+                    var tsUtc = ts.ToUniversalTime();
+                    if (tsUtc <= lastSeen) continue;
+
+                    if (!includeOwn && ownAccountId.HasValue
+                        && m.TryGetProperty("author", out var author)
+                        && author.ValueKind == JsonValueKind.Object
+                        && author.TryGetProperty("id", out var authorId)
+                        && authorId.ValueKind == JsonValueKind.Number
+                        && authorId.GetInt64() == ownAccountId.Value)
+                    {
+                        lastSeen = tsUtc;
+                        continue;
+                    }
+
+                    yield return new RolespaceMessage(m.Clone());
+                    lastSeen = tsUtc;
+                }
+            }
+
+            try { await Task.Delay(idleDelayMs, ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { yield break; }
+        }
+    }
 
     // ─── internal: unwrap "{ data: [...] }" list responses ──────────────────
     private async Task<List<T>> GetListAsync<T>(string path, Func<JsonElement, T> map, CancellationToken ct)
