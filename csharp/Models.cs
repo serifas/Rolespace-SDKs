@@ -16,6 +16,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.Json;
 
 namespace Rolespace.Sdk;
@@ -445,4 +446,237 @@ public sealed class RolespaceEmbedGalleryItem
     public string Url { get; set; } = "";
     /// <summary>One of <c>"nsfw"</c>, <c>"triggering"</c>, <c>"spoiler"</c>.</summary>
     public string? Flag { get; set; }
+}
+
+// ═════════════ Interactive components (panels of buttons + selects) ════════
+//
+// A bot attaches a Components panel to a message to render clickable buttons and
+// select menus. When a user interacts, the bot picks the interaction up off
+// rs.InteractionsAsync() and replies with one of the Respond* helpers below.
+//
+// Usage:
+//   var panel = new RolespaceComponents()
+//       .Row(new RolespaceButton("yes", "Yes").Success(),
+//            new RolespaceButton("no",  "No").Secondary())
+//       .Row(new RolespaceSelect("topic", "Pick a topic…")
+//                .Option("Bugs",  "bugs")
+//                .Option("Ideas", "ideas"));
+//   await rs.SendMessageAsync(serverId, channelId, "Pick one:", panel);
+//
+// Server-side limits (enforced by ComponentSpec.Normalize): max 5 rows, max 5
+// buttons per row, max 1 select per row, max 25 options per select.
+
+/// <summary>The root component panel: an ordered list of action rows.</summary>
+public sealed class RolespaceComponents
+{
+    /// <summary>The rows in this panel. Each row holds buttons and/or one select menu.</summary>
+    public List<RolespaceComponentRow> Rows { get; } = new();
+
+    /// <summary>Append a row containing the given buttons/selects.</summary>
+    public RolespaceComponents Row(params RolespaceComponentBase[] components)
+    {
+        var row = new RolespaceComponentRow();
+        foreach (var c in components) row.Components.Add(c);
+        Rows.Add(row);
+        return this;
+    }
+
+    /// <summary>Serialize to the shape <c>SendMessageAsync</c> / <c>RespondMessageAsync</c> expect.</summary>
+    public object ToPayload() =>
+        Rows.Select(r => new
+        {
+            type = "row",
+            components = r.Components.Select(c => c.ToPayload()).ToList()
+        }).ToList();
+}
+
+/// <summary>One row in a panel. Built indirectly via <see cref="RolespaceComponents.Row"/>.</summary>
+public sealed class RolespaceComponentRow
+{
+    public List<RolespaceComponentBase> Components { get; } = new();
+}
+
+/// <summary>Base for the things that can sit inside a row — a button or a select menu.</summary>
+public abstract class RolespaceComponentBase
+{
+    /// <summary>Serialize to an anonymous object with the right server-side shape.</summary>
+    public abstract object ToPayload();
+}
+
+/// <summary>A clickable button. Use the fluent <c>.Primary()</c> / <c>.Success()</c> / etc.
+/// to set the style, or <see cref="Link"/> for a static link button.</summary>
+public sealed class RolespaceButton : RolespaceComponentBase
+{
+    public string CustomId { get; set; } = "";
+    public string Label { get; set; } = "";
+    /// <summary>One of <c>primary</c>, <c>secondary</c>, <c>success</c>, <c>danger</c>, <c>link</c>.</summary>
+    public string Style { get; set; } = "secondary";
+    /// <summary>Set on link-style buttons. Ignored on other styles.</summary>
+    public string? Url { get; set; }
+
+    /// <summary>Build a normal callback button. Required <c>customId</c> + <c>label</c>.</summary>
+    public RolespaceButton(string customId, string label) { CustomId = customId; Label = label; }
+
+    /// <summary>Build a link-style button — opens a URL in a new tab; no interaction fired.</summary>
+    public static RolespaceButton Link(string url, string label = "Open") =>
+        new RolespaceButton(customId: "", label) { Style = "link", Url = url };
+
+    public RolespaceButton Primary()   { Style = "primary";   return this; }
+    public RolespaceButton Secondary() { Style = "secondary"; return this; }
+    public RolespaceButton Success()   { Style = "success";   return this; }
+    public RolespaceButton Danger()    { Style = "danger";    return this; }
+
+    public override object ToPayload() => Style == "link"
+        ? (object)new { type = "button", style = "link", label = Label, url = Url }
+        : new { type = "button", style = Style, label = Label, customId = CustomId };
+}
+
+/// <summary>A drop-down select menu. Add options with <see cref="Option"/>.</summary>
+public sealed class RolespaceSelect : RolespaceComponentBase
+{
+    public string CustomId { get; set; } = "";
+    public string? Placeholder { get; set; }
+    /// <summary>Minimum selectable options (default 1).</summary>
+    public int MinValues { get; set; } = 1;
+    /// <summary>Maximum selectable options (default 1 — single-select).</summary>
+    public int MaxValues { get; set; } = 1;
+    public List<RolespaceSelectOption> Options { get; } = new();
+
+    public RolespaceSelect(string customId, string? placeholder = null)
+    {
+        CustomId = customId;
+        Placeholder = placeholder;
+    }
+
+    /// <summary>Append an option. Up to 25 options per select.</summary>
+    public RolespaceSelect Option(string label, string value, string? description = null)
+    {
+        Options.Add(new RolespaceSelectOption { Label = label, Value = value, Description = description });
+        return this;
+    }
+
+    /// <summary>Allow the user to pick between <paramref name="min"/> and <paramref name="max"/> options.</summary>
+    public RolespaceSelect Range(int min, int max) { MinValues = min; MaxValues = max; return this; }
+
+    public override object ToPayload() => new
+    {
+        type = "select",
+        customId = CustomId,
+        placeholder = Placeholder,
+        minValues = MinValues,
+        maxValues = MaxValues,
+        options = Options.Select(o => o.Description == null
+            ? (object)new { label = o.Label, value = o.Value }
+            : new { label = o.Label, value = o.Value, description = o.Description }).ToList()
+    };
+}
+
+public sealed class RolespaceSelectOption
+{
+    public string Label { get; set; } = "";
+    public string Value { get; set; } = "";
+    /// <summary>Optional secondary text shown under the option label.</summary>
+    public string? Description { get; set; }
+}
+
+// ═════════════════════════════════ Modals ═══════════════════════════════════
+//
+// A small form a bot opens in response to an interaction. The user fills the
+// fields and submits, which arrives as a `modal_submit` interaction with the
+// values in `ix.Data.fields`.
+//
+// Usage:
+//   var modal = new RolespaceModal("bug-form", "Report a bug")
+//       .Short("summary", "Summary").Required()
+//       .Paragraph("details", "What happened?");
+//   await rs.RespondModalAsync(ix.Id, modal);
+
+/// <summary>A modal form — title, customId, and up to 5 inputs.</summary>
+public sealed class RolespaceModal
+{
+    public string CustomId { get; set; } = "";
+    public string Title { get; set; } = "";
+    public List<RolespaceModalInput> Inputs { get; } = new();
+
+    public RolespaceModal(string customId, string title) { CustomId = customId; Title = title; }
+
+    /// <summary>Add a single-line text input.</summary>
+    public RolespaceModal Short(string customId, string label, string? placeholder = null, int maxLength = 1000, string? value = null)
+    {
+        Inputs.Add(new RolespaceModalInput
+        {
+            CustomId = customId, Label = label, Style = "short",
+            Placeholder = placeholder, MaxLength = maxLength, Value = value, Required = true
+        });
+        return this;
+    }
+
+    /// <summary>Add a multi-line text input.</summary>
+    public RolespaceModal Paragraph(string customId, string label, string? placeholder = null, int maxLength = 1000, string? value = null)
+    {
+        Inputs.Add(new RolespaceModalInput
+        {
+            CustomId = customId, Label = label, Style = "paragraph",
+            Placeholder = placeholder, MaxLength = maxLength, Value = value, Required = true
+        });
+        return this;
+    }
+
+    /// <summary>Add an image upload input. The submitted value is the uploaded image URL
+    /// (or newline-separated URLs when <paramref name="multiple"/> is true).</summary>
+    public RolespaceModal Image(string customId, string label, string? currentUrl = null, bool multiple = false)
+    {
+        Inputs.Add(new RolespaceModalInput
+        {
+            CustomId = customId, Label = label, Style = "image",
+            CurrentUrl = currentUrl, Multiple = multiple, Required = true
+        });
+        return this;
+    }
+
+    /// <summary>Mark the LAST added input as optional. Chain after Short/Paragraph/Image.</summary>
+    public RolespaceModal Optional()
+    {
+        if (Inputs.Count > 0) Inputs[^1].Required = false;
+        return this;
+    }
+
+    /// <summary>Mark the last added input as required (already the default; here for symmetry).</summary>
+    public RolespaceModal Required()
+    {
+        if (Inputs.Count > 0) Inputs[^1].Required = true;
+        return this;
+    }
+
+    /// <summary>Serialize to the <c>{ title, customId, inputs }</c> shape the modal endpoint expects.</summary>
+    public object ToPayload() => new
+    {
+        title = Title,
+        customId = CustomId,
+        inputs = Inputs.Select(i => i.Style == "image"
+            ? (object)new { customId = i.CustomId, label = i.Label, style = i.Style,
+                            placeholder = i.Placeholder, required = i.Required, multiple = i.Multiple, currentUrl = i.CurrentUrl }
+            : new { customId = i.CustomId, label = i.Label, style = i.Style,
+                    placeholder = i.Placeholder, required = i.Required, maxLength = i.MaxLength, value = i.Value }).ToList()
+    };
+}
+
+/// <summary>One input field inside a modal. Don't construct directly — use the
+/// <see cref="RolespaceModal.Short"/> / <see cref="RolespaceModal.Paragraph"/> / <see cref="RolespaceModal.Image"/> builders.</summary>
+public sealed class RolespaceModalInput
+{
+    public string CustomId { get; set; } = "";
+    public string Label { get; set; } = "";
+    /// <summary>One of <c>short</c>, <c>paragraph</c>, <c>image</c>.</summary>
+    public string Style { get; set; } = "short";
+    public string? Placeholder { get; set; }
+    public bool Required { get; set; } = true;
+    /// <summary>Text inputs only. Default 1000, max 4000.</summary>
+    public int MaxLength { get; set; } = 1000;
+    /// <summary>Text inputs only — pre-fill value.</summary>
+    public string? Value { get; set; }
+    /// <summary>Image inputs only — show the existing image alongside the picker.</summary>
+    public string? CurrentUrl { get; set; }
+    /// <summary>Image inputs only — allow uploading several images; submitted value is newline-separated.</summary>
+    public bool Multiple { get; set; }
 }

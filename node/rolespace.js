@@ -246,6 +246,173 @@ class RolespaceEmbed {
     }
 }
 
+// ═════════════ Interactive components (panels of buttons + selects) ════════
+//
+// A bot attaches a Components panel to a message to render clickable buttons
+// and select menus. When a user interacts, the bot picks the interaction up
+// off `rs.interactions()` and replies with one of the `rs.respond*` helpers.
+//
+// Usage:
+//   const panel = new Components()
+//       .row(new Button('yes', 'Yes').success(),
+//            new Button('no',  'No').secondary())
+//       .row(new Select('topic', 'Pick a topic…')
+//               .option('Bugs',  'bugs')
+//               .option('Ideas', 'ideas'));
+//   await rs.sendMessage(serverId, channelId, 'Pick one:', panel);
+//
+// Server-side limits: max 5 rows, max 5 buttons per row, max 1 select per row,
+// max 25 options per select.
+
+/** A clickable button. Default style is 'secondary' — chain .primary() /
+ *  .success() / .danger() / .secondary() to change it, or use Button.link(url, label)
+ *  for a static link button. */
+class Button {
+    constructor(customId, label) {
+        this.customId = customId;
+        this.label = label;
+        this.style = 'secondary';
+        this.url = null;
+    }
+    static link(url, label = 'Open') {
+        const b = new Button('', label);
+        b.style = 'link';
+        b.url = url;
+        return b;
+    }
+    primary()   { this.style = 'primary';   return this; }
+    secondary() { this.style = 'secondary'; return this; }
+    success()   { this.style = 'success';   return this; }
+    danger()    { this.style = 'danger';    return this; }
+
+    toJSON() {
+        return this.style === 'link'
+            ? { type: 'button', style: 'link', label: this.label, url: this.url }
+            : { type: 'button', style: this.style, label: this.label, customId: this.customId };
+    }
+}
+
+/** A drop-down select menu. Add options with .option(label, value, description?).
+ *  Default is single-select; use .range(min, max) to allow multiple selections. */
+class Select {
+    constructor(customId, placeholder) {
+        this.customId = customId;
+        this.placeholder = placeholder || null;
+        this.minValues = 1;
+        this.maxValues = 1;
+        this.options = [];
+    }
+    option(label, value, description) {
+        const o = { label, value };
+        if (description != null) o.description = description;
+        this.options.push(o);
+        return this;
+    }
+    range(min, max) { this.minValues = min; this.maxValues = max; return this; }
+
+    toJSON() {
+        return {
+            type: 'select',
+            customId: this.customId,
+            placeholder: this.placeholder,
+            minValues: this.minValues,
+            maxValues: this.maxValues,
+            options: this.options.map(o => ({ ...o })),
+        };
+    }
+}
+
+/** The root component panel: an ordered list of rows. Each .row(...components)
+ *  appends one row holding the given buttons/selects. */
+class Components {
+    constructor() {
+        this._rows = [];
+    }
+    row(...components) {
+        this._rows.push(components);
+        return this;
+    }
+    /** Serialize to the array shape sendMessage / respond expect. */
+    toJSON() {
+        return this._rows.map(row => ({
+            type: 'row',
+            components: row.map(c => (c && typeof c.toJSON === 'function') ? c.toJSON() : c),
+        }));
+    }
+}
+
+// ═════════════════════════════════ Modals ═══════════════════════════════════
+//
+// A small form a bot opens in response to an interaction. The user fills it
+// and submits, which arrives as a `modal_submit` interaction with the filled
+// values in `ix.data.fields`.
+//
+// Usage:
+//   const modal = new Modal('bug-form', 'Report a bug')
+//       .short('summary', 'Summary')
+//       .paragraph('details', 'What happened?').optional();
+//   await rs.respondModal(ix.id, modal);
+
+/** A modal form — title, customId, and up to 5 inputs. Add inputs with
+ *  .short() / .paragraph() / .image(). Chain .optional() after an input to make
+ *  it not required. */
+class Modal {
+    constructor(customId, title) {
+        this.customId = customId;
+        this.title = title;
+        this._inputs = [];
+    }
+    short(customId, label, opts) {
+        opts = opts || {};
+        this._inputs.push({
+            customId, label, style: 'short',
+            placeholder: opts.placeholder || null,
+            required: true,
+            maxLength: opts.maxLength || 1000,
+            value: opts.value || null,
+        });
+        return this;
+    }
+    paragraph(customId, label, opts) {
+        opts = opts || {};
+        this._inputs.push({
+            customId, label, style: 'paragraph',
+            placeholder: opts.placeholder || null,
+            required: true,
+            maxLength: opts.maxLength || 1000,
+            value: opts.value || null,
+        });
+        return this;
+    }
+    image(customId, label, opts) {
+        opts = opts || {};
+        this._inputs.push({
+            customId, label, style: 'image',
+            required: true,
+            multiple: !!opts.multiple,
+            currentUrl: opts.currentUrl || null,
+        });
+        return this;
+    }
+    /** Mark the LAST added input as optional. */
+    optional() {
+        if (this._inputs.length) this._inputs[this._inputs.length - 1].required = false;
+        return this;
+    }
+    /** Mark the last added input as required (already the default). */
+    required() {
+        if (this._inputs.length) this._inputs[this._inputs.length - 1].required = true;
+        return this;
+    }
+    toJSON() {
+        return {
+            title: this.title,
+            customId: this.customId,
+            inputs: this._inputs.map(i => ({ ...i })),
+        };
+    }
+}
+
 // ════════════════════════ Main client ══════════════════════════════════
 
 class Rolespace {
@@ -356,6 +523,72 @@ class Rolespace {
     async serverRoles(id) {
         const resp = await this.get(`/servers/${id}/roles`);
         return _unwrapList(resp).map(r => new RolespaceRole(r));
+    }
+
+    // ---- Role / permission convenience helpers ──────────────────────────
+
+    /**
+     * Resolve a member's role ids into the full RolespaceRole objects
+     * (name, color, permissions). One serverMember + one serverRoles call.
+     * @returns {Promise<RolespaceRole[]>}
+     */
+    async memberRoles(serverId, userId) {
+        const [member, roles] = await Promise.all([
+            this.serverMember(serverId, userId),
+            this.serverRoles(serverId),
+        ]);
+        const ids = new Set(member.roleIds.map(String));
+        return roles.filter(r => ids.has(String(r.id)));
+    }
+
+    /**
+     * True if the member has the given role. Pass a numeric id, or a name string
+     * (case-insensitive). Returns false if no role with that name exists.
+     *
+     *   if (await rs.hasRole(serverId, msg.author.id, 'Moderator')) { ... }
+     *   if (await rs.hasRole(serverId, msg.author.id, modRoleId))   { ... }
+     *
+     * @returns {Promise<boolean>}
+     */
+    async hasRole(serverId, userId, role) {
+        const member = await this.serverMember(serverId, userId);
+        if (typeof role === 'number' || typeof role === 'bigint') {
+            const wanted = String(role);
+            return member.roleIds.some(id => String(id) === wanted);
+        }
+        if (typeof role !== 'string' || !role.trim()) return false;
+        const wanted = role.trim().toLowerCase();
+        const roles = await this.serverRoles(serverId);
+        const match = roles.find(r => (r.name || '').toLowerCase() === wanted);
+        if (!match) return false;
+        const wantedId = String(match.id);
+        return member.roleIds.some(id => String(id) === wantedId);
+    }
+
+    /**
+     * True if the member is allowed to perform the named action. The server owner
+     * and anyone with the `administrator` flag always pass.
+     *
+     * Accepted names (case-insensitive): administrator, manageServer, manageRoles,
+     * manageChannels, manageMessages, kickMembers, banMembers, sendMessages,
+     * viewChannels, addReactions.
+     *
+     *   if (await rs.hasPermission(serverId, msg.author.id, 'banMembers')) { ... }
+     *
+     * @returns {Promise<boolean>}
+     */
+    async hasPermission(serverId, userId, permission) {
+        const member = await this.serverMember(serverId, userId);
+        if (member.isOwner) return true;
+        const roles = await this.serverRoles(serverId);
+        const ids = new Set(member.roleIds.map(String));
+        for (const r of roles) {
+            if (!ids.has(String(r.id))) continue;
+            const perms = r.permissions || {};
+            if (perms.administrator) return true;
+            if (_permissionFlag(perms, permission)) return true;
+        }
+        return false;
     }
 
     /**
@@ -677,6 +910,64 @@ class Rolespace {
         return this.post(`/interactions/${interactionId}/callback`, reply);
     }
 
+    // ---- Typed interaction response helpers ─────────────────────────────────
+
+    /** Acknowledge an interaction with no visible response. */
+    respondAck(interactionId) {
+        return this.post(`/interactions/${interactionId}/callback`, { type: 'ack' });
+    }
+
+    /**
+     * Post a new message in response to an interaction. Pass extras (embeds and/or
+     * one Components panel) the same way as sendMessage. Set `ephemeral` to make
+     * the reply visible only to the user who interacted (not stored, gone on reload).
+     *
+     *   await rs.respondMessage(ix.id, 'Done!');
+     *   await rs.respondMessage(ix.id, 'Done!', { ephemeral: true });
+     *   await rs.respondMessage(ix.id, 'Done!', embed);
+     *   await rs.respondMessage(ix.id, 'Done!', panel, { ephemeral: true });
+     */
+    respondMessage(interactionId, content, ...rest) {
+        // Pull off the optional trailing options bag — { ephemeral }
+        let ephemeral = false;
+        if (rest.length > 0) {
+            const last = rest[rest.length - 1];
+            if (last && typeof last === 'object'
+                && !(last instanceof RolespaceEmbed)
+                && !(last instanceof Components)
+                && Object.prototype.hasOwnProperty.call(last, 'ephemeral')) {
+                ephemeral = !!last.ephemeral;
+                rest = rest.slice(0, -1);
+            }
+        }
+        const payload = _buildMessagePayload([content, ...rest]);
+        payload.type = 'message';
+        payload.ephemeral = ephemeral;
+        return this.post(`/interactions/${interactionId}/callback`, payload);
+    }
+
+    /**
+     * Edit the panel that was clicked. Pass `null` (or omit) for either to leave
+     * it unchanged; pass an empty `new Components()` to remove the panel entirely.
+     *
+     *   await rs.respondUpdate(ix.id, 'Thanks for voting!');
+     *   await rs.respondUpdate(ix.id, null, newPanel);
+     *   await rs.respondUpdate(ix.id, 'Done', new Components()); // strip panel
+     */
+    respondUpdate(interactionId, content = null, components = null) {
+        const payload = { type: 'update' };
+        if (content != null) payload.content = content;
+        if (components != null) payload.components = components.toJSON();
+        return this.post(`/interactions/${interactionId}/callback`, payload);
+    }
+
+    /** Open a modal form in response to the interaction. Submission arrives as a
+     *  `modal_submit` interaction with the filled values in `ix.data.fields`. */
+    respondModal(interactionId, modal) {
+        return this.post(`/interactions/${interactionId}/callback`,
+            { type: 'modal', modal: modal.toJSON() });
+    }
+
     // ---- Listening for new messages in a channel ───────────────────────────
     /**
      * Async iterator that yields new RolespaceMessage objects as they appear in a channel.
@@ -777,36 +1068,73 @@ function _unwrapList(resp) {
     return [];
 }
 
+// Accepted permission names (case-insensitive). Mirrors the C#/Python surface.
+const _PERMISSION_KEYS = {
+    administrator:   'administrator',
+    manageserver:    'manageServer',
+    manageroles:     'manageRoles',
+    managechannels:  'manageChannels',
+    managemessages:  'manageMessages',
+    kickmembers:     'kickMembers',
+    banmembers:      'banMembers',
+    sendmessages:    'sendMessages',
+    viewchannels:    'viewChannels',
+    addreactions:    'addReactions',
+};
+
+function _permissionFlag(perms, name) {
+    if (typeof name !== 'string' || !name.trim()) return false;
+    const key = _PERMISSION_KEYS[name.trim().toLowerCase()];
+    return key ? !!perms[key] : false;
+}
+
 /**
  * Build a message-shaped payload from the variadic tail of sendMessage / sendDM.
- * Accepts: ["text"], ["text", embed, ...], [embed], [embed, embed], [{content, embeds, ...}].
+ * Accepts: ["text"], ["text", embed, ...], [embed], [embed, embed], [panel],
+ *          ["text", panel], ["text", embed, panel], [{content, embeds, ...}].
  */
 function _buildMessagePayload(rest) {
     if (rest.length === 0) return { content: '' };
 
-    // Single object payload — anything not a string and not a RolespaceEmbed.
+    // Single non-builder object payload — caller hand-shaped the JSON.
     if (rest.length === 1) {
         const arg = rest[0];
         if (typeof arg === 'string') return { content: arg };
         if (arg instanceof RolespaceEmbed) return { content: '', embeds: [arg.toJSON()] };
+        if (arg instanceof Components)    return { content: '', components: arg.toJSON() };
         if (arg && typeof arg === 'object') return arg; // raw payload object
     }
 
-    // Mixed: string text + N embeds, or N embeds with no text (caller passed embeds directly).
+    // Mixed: text + any combination of embeds + one Components panel.
     let content = '';
     const embeds = [];
+    let componentsPayload = null;
     for (const arg of rest) {
         if (typeof arg === 'string') content = arg;
         else if (arg instanceof RolespaceEmbed) embeds.push(arg.toJSON());
-        else if (arg && typeof arg === 'object') Object.assign({}, arg); // ignore stray objects to keep behavior predictable
+        else if (arg instanceof Components) {
+            if (componentsPayload !== null) {
+                throw new Error('sendMessage: only one Components panel is allowed per message.');
+            }
+            componentsPayload = arg.toJSON();
+        }
+        // anything else: silently ignored to keep behavior predictable
     }
-    return embeds.length > 0 ? { content, embeds } : { content };
+    const out = { content };
+    if (embeds.length > 0) out.embeds = embeds;
+    if (componentsPayload !== null) out.components = componentsPayload;
+    return out;
 }
 
 module.exports = {
     Rolespace,
     RolespaceError,
     RolespaceEmbed,
+    // Component / modal builders.
+    Components,
+    Button,
+    Select,
+    Modal,
     // Response wrappers exported so callers can `instanceof`-check or extend.
     RolespaceObject,
     RolespaceMe,

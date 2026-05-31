@@ -178,6 +178,75 @@ public sealed class RolespaceClient : IDisposable
     public Task<List<RolespaceRole>> ServerRolesAsync(long id, CancellationToken ct = default)
         => GetListAsync($"/servers/{id}/roles", el => new RolespaceRole(el), ct);
 
+    // ---- Role / permission convenience helpers ───────────────────────────
+
+    /// <summary>Resolve a member's role ids into the full <see cref="RolespaceRole"/> objects
+    /// (name, color, permissions). One <c>ServerMemberAsync</c> + one <c>ServerRolesAsync</c> call.</summary>
+    public async Task<List<RolespaceRole>> MemberRolesAsync(long serverId, long userId, CancellationToken ct = default)
+    {
+        var member = await ServerMemberAsync(serverId, userId, ct).ConfigureAwait(false);
+        var roles  = await ServerRolesAsync(serverId, ct).ConfigureAwait(false);
+        var ids = new HashSet<long>(member.RoleIds);
+        return roles.Where(r => ids.Contains(r.Id)).ToList();
+    }
+
+    /// <summary>True if the member has the role with the given id.</summary>
+    /// <example><code>if (await rs.HasRoleAsync(serverId, msg.Author.Id, modRoleId)) { ... }</code></example>
+    public async Task<bool> HasRoleAsync(long serverId, long userId, long roleId, CancellationToken ct = default)
+    {
+        var member = await ServerMemberAsync(serverId, userId, ct).ConfigureAwait(false);
+        return member.RoleIds.Contains(roleId);
+    }
+
+    /// <summary>True if the member has a role with the given name (case-insensitive).
+    /// Returns <c>false</c> if no role with that name exists in the server.</summary>
+    /// <example><code>if (await rs.HasRoleAsync(serverId, msg.Author.Id, "Moderator")) { ... }</code></example>
+    public async Task<bool> HasRoleAsync(long serverId, long userId, string roleName, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(roleName)) return false;
+        var roles  = await ServerRolesAsync(serverId, ct).ConfigureAwait(false);
+        var role   = roles.FirstOrDefault(r => string.Equals(r.Name, roleName, StringComparison.OrdinalIgnoreCase));
+        if (role == null) return false;
+        var member = await ServerMemberAsync(serverId, userId, ct).ConfigureAwait(false);
+        return member.RoleIds.Contains(role.Id);
+    }
+
+    /// <summary>True if the member is allowed to perform the named action. The server owner
+    /// and anyone with <c>administrator</c> always pass. Otherwise checks each of the member's
+    /// roles for the named permission flag.
+    /// <para>Accepted names (case-insensitive): <c>administrator</c>, <c>manageServer</c>,
+    /// <c>manageRoles</c>, <c>manageChannels</c>, <c>manageMessages</c>, <c>kickMembers</c>,
+    /// <c>banMembers</c>, <c>sendMessages</c>, <c>viewChannels</c>, <c>addReactions</c>.</para></summary>
+    /// <example><code>if (await rs.HasPermissionAsync(serverId, msg.Author.Id, "banMembers")) { ... }</code></example>
+    public async Task<bool> HasPermissionAsync(long serverId, long userId, string permission, CancellationToken ct = default)
+    {
+        var member = await ServerMemberAsync(serverId, userId, ct).ConfigureAwait(false);
+        if (member.IsOwner) return true;
+        var roles = await ServerRolesAsync(serverId, ct).ConfigureAwait(false);
+        var ids = new HashSet<long>(member.RoleIds);
+        foreach (var r in roles.Where(r => ids.Contains(r.Id)))
+        {
+            if (r.Permissions.Administrator) return true;
+            if (PermissionFlag(r.Permissions, permission)) return true;
+        }
+        return false;
+    }
+
+    private static bool PermissionFlag(RolespaceRolePermissions p, string? name) => name?.ToLowerInvariant() switch
+    {
+        "administrator"   => p.Administrator,
+        "manageserver"    => p.ManageServer,
+        "manageroles"     => p.ManageRoles,
+        "managechannels"  => p.ManageChannels,
+        "managemessages"  => p.ManageMessages,
+        "kickmembers"     => p.KickMembers,
+        "banmembers"      => p.BanMembers,
+        "sendmessages"    => p.SendMessages,
+        "viewchannels"    => p.ViewChannels,
+        "addreactions"    => p.AddReactions,
+        _                 => false,
+    };
+
     /// <summary>Send a plain-text message. Returns the message including its server-assigned id.</summary>
     public async Task<RolespaceMessage> SendMessageAsync(long serverId, long channelId, string text, CancellationToken ct = default)
         => new(await PostAsync($"/servers/{serverId}/channels/{channelId}/messages",
@@ -208,6 +277,32 @@ public sealed class RolespaceClient : IDisposable
     /// <summary>Send a single embed with no message text.</summary>
     public Task<RolespaceMessage> SendMessageAsync(long serverId, long channelId, RolespaceEmbed embed, CancellationToken ct = default)
         => SendMessageAsync(serverId, channelId, "", new[] { embed }, ct);
+
+    /// <summary>Send text plus an interactive panel of buttons / select menus.</summary>
+    /// <example>
+    /// <code>
+    /// var panel = new RolespaceComponents()
+    ///     .Row(new RolespaceButton("yes", "Yes").Success(),
+    ///          new RolespaceButton("no",  "No").Secondary());
+    /// await rs.SendMessageAsync(serverId, channelId, "Pick one:", panel);
+    /// </code>
+    /// </example>
+    public async Task<RolespaceMessage> SendMessageAsync(long serverId, long channelId, string text, RolespaceComponents components, CancellationToken ct = default)
+    {
+        object payload = new { content = text, components = components.ToPayload() };
+        return new(await PostAsync($"/servers/{serverId}/channels/{channelId}/messages", payload, ct).ConfigureAwait(false));
+    }
+
+    /// <summary>Send a panel-only message (no text).</summary>
+    public Task<RolespaceMessage> SendMessageAsync(long serverId, long channelId, RolespaceComponents components, CancellationToken ct = default)
+        => SendMessageAsync(serverId, channelId, "", components, ct);
+
+    /// <summary>Send text, embeds, AND a panel in one call.</summary>
+    public async Task<RolespaceMessage> SendMessageAsync(long serverId, long channelId, string text, RolespaceEmbed[] embeds, RolespaceComponents components, CancellationToken ct = default)
+    {
+        object payload = new { content = text, embeds, components = components.ToPayload() };
+        return new(await PostAsync($"/servers/{serverId}/channels/{channelId}/messages", payload, ct).ConfigureAwait(false));
+    }
 
     /// <summary>Send a richer message — pass an anonymous object with content/embeds/components/replyToMessageId.</summary>
     public async Task<RolespaceMessage> SendMessageAsync(long serverId, long channelId, object payload, CancellationToken ct = default)
@@ -472,9 +567,55 @@ public sealed class RolespaceClient : IDisposable
 
     /// <summary>Respond to an interaction. <paramref name="reply"/> is an anonymous object:
     /// <c>new { type = "message", content = "hi", ephemeral = true }</c>.
-    /// Response shape varies by reply type, so this stays raw JsonElement.</summary>
+    /// Response shape varies by reply type, so this stays raw JsonElement.
+    /// Most callers want one of the typed <c>RespondMessage</c> / <c>RespondUpdate</c> /
+    /// <c>RespondModal</c> / <c>RespondAck</c> helpers below instead.</summary>
     public Task<JsonElement> RespondAsync(long interactionId, object reply, CancellationToken ct = default)
         => PostAsync($"/interactions/{interactionId}/callback", reply, ct);
+
+    // ---- Typed interaction response helpers ─────────────────────────────────
+
+    /// <summary>Acknowledge an interaction with no visible response (the click is "consumed" silently).</summary>
+    public Task<JsonElement> RespondAckAsync(long interactionId, CancellationToken ct = default)
+        => PostAsync($"/interactions/{interactionId}/callback", new { type = "ack" }, ct);
+
+    /// <summary>Post a new message in response to the interaction.
+    /// Set <paramref name="ephemeral"/> to make it visible only to the user who interacted
+    /// (not stored, gone on reload).</summary>
+    public Task<JsonElement> RespondMessageAsync(long interactionId, string content, bool ephemeral = false, CancellationToken ct = default)
+        => PostAsync($"/interactions/{interactionId}/callback",
+            new { type = "message", content, ephemeral }, ct);
+
+    /// <summary>Reply with a rich embed (and optional text).</summary>
+    public Task<JsonElement> RespondMessageAsync(long interactionId, string content, RolespaceEmbed embed, bool ephemeral = false, CancellationToken ct = default)
+        => PostAsync($"/interactions/{interactionId}/callback",
+            new { type = "message", content, embeds = new[] { embed }, ephemeral }, ct);
+
+    /// <summary>Reply with a fresh panel of buttons / select menus (and optional text).</summary>
+    public Task<JsonElement> RespondMessageAsync(long interactionId, string content, RolespaceComponents components, bool ephemeral = false, CancellationToken ct = default)
+        => PostAsync($"/interactions/{interactionId}/callback",
+            new { type = "message", content, components = components.ToPayload(), ephemeral }, ct);
+
+    /// <summary>Edit the panel that was clicked: new content and/or new components.
+    /// Pass <c>null</c> for either to leave it unchanged; pass an empty <see cref="RolespaceComponents"/>
+    /// to remove the panel entirely.</summary>
+    public Task<JsonElement> RespondUpdateAsync(long interactionId, string? content = null, RolespaceComponents? components = null, CancellationToken ct = default)
+    {
+        object payload = (content, components) switch
+        {
+            (null, null)   => new { type = "update" },
+            (not null, null) => (object)new { type = "update", content },
+            (null, not null) => new { type = "update", components = components!.ToPayload() },
+            _                => new { type = "update", content, components = components!.ToPayload() },
+        };
+        return PostAsync($"/interactions/{interactionId}/callback", payload, ct);
+    }
+
+    /// <summary>Open a modal form in response to the interaction. The user's submission arrives
+    /// as a <c>modal_submit</c> interaction with the filled values in <c>ix.Data.fields</c>.</summary>
+    public Task<JsonElement> RespondModalAsync(long interactionId, RolespaceModal modal, CancellationToken ct = default)
+        => PostAsync($"/interactions/{interactionId}/callback",
+            new { type = "modal", modal = modal.ToPayload() }, ct);
 
     // ---- Listening for new messages in a channel ───────────────────────────
     /// <summary>

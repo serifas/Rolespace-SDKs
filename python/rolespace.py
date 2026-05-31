@@ -429,6 +429,177 @@ class RolespaceEmbed:
         return out
 
 
+# ═════════════ Interactive components (panels of buttons + selects) ════════
+#
+# A bot attaches a Components panel to a message to render clickable buttons
+# and select menus. When a user interacts, the bot picks the interaction up
+# off ``rs.interactions()`` and replies with one of the ``rs.respond_*`` helpers.
+#
+# Usage::
+#
+#     panel = (Components()
+#              .row(Button("yes", "Yes").success(),
+#                   Button("no",  "No").secondary())
+#              .row(Select("topic", "Pick a topic…")
+#                       .option("Bugs",  "bugs")
+#                       .option("Ideas", "ideas")))
+#     rs.send_message(server_id, channel_id, "Pick one:", panel)
+#
+# Server-side limits: max 5 rows, max 5 buttons per row, max 1 select per row,
+# max 25 options per select.
+
+
+class Button:
+    """A clickable button. Default style is ``secondary`` — chain ``.primary()`` /
+    ``.success()`` / ``.danger()`` / ``.secondary()`` to change it, or use
+    ``Button.link(url, label)`` for a static link button."""
+
+    def __init__(self, custom_id: str, label: str):
+        self.custom_id = custom_id
+        self.label = label
+        self.style = "secondary"
+        self.url: Optional[str] = None
+
+    @classmethod
+    def link(cls, url: str, label: str = "Open") -> "Button":
+        b = cls("", label)
+        b.style = "link"
+        b.url = url
+        return b
+
+    def primary(self) -> "Button":   self.style = "primary";   return self
+    def secondary(self) -> "Button": self.style = "secondary"; return self
+    def success(self) -> "Button":   self.style = "success";   return self
+    def danger(self) -> "Button":    self.style = "danger";    return self
+
+    def to_dict(self) -> dict:
+        if self.style == "link":
+            return {"type": "button", "style": "link", "label": self.label, "url": self.url}
+        return {"type": "button", "style": self.style, "label": self.label, "customId": self.custom_id}
+
+
+class Select:
+    """A drop-down select menu. Add options with ``.option(label, value, description=None)``.
+    Default is single-select; use ``.range(min, max)`` to allow multiple selections."""
+
+    def __init__(self, custom_id: str, placeholder: Optional[str] = None):
+        self.custom_id = custom_id
+        self.placeholder = placeholder
+        self.min_values = 1
+        self.max_values = 1
+        self.options: List[dict] = []
+
+    def option(self, label: str, value: str, description: Optional[str] = None) -> "Select":
+        opt: dict = {"label": label, "value": value}
+        if description is not None:
+            opt["description"] = description
+        self.options.append(opt)
+        return self
+
+    def range(self, min_values: int, max_values: int) -> "Select":
+        self.min_values = min_values
+        self.max_values = max_values
+        return self
+
+    def to_dict(self) -> dict:
+        return {
+            "type": "select",
+            "customId": self.custom_id,
+            "placeholder": self.placeholder,
+            "minValues": self.min_values,
+            "maxValues": self.max_values,
+            "options": list(self.options),
+        }
+
+
+class Components:
+    """The root component panel: an ordered list of rows. Each ``.row(*components)``
+    appends one row holding the given buttons/selects."""
+
+    def __init__(self):
+        self._rows: List[List[Any]] = []
+
+    def row(self, *components) -> "Components":
+        self._rows.append(list(components))
+        return self
+
+    def to_list(self) -> list:
+        return [
+            {"type": "row", "components": [c.to_dict() if hasattr(c, "to_dict") else c for c in row]}
+            for row in self._rows
+        ]
+
+
+# ═════════════════════════════════ Modals ═══════════════════════════════════
+#
+# A small form a bot opens in response to an interaction. The user fills it
+# and submits, which arrives as a ``modal_submit`` interaction with the values
+# in ``ix.data["fields"]``.
+#
+# Usage::
+#
+#     modal = (Modal("bug-form", "Report a bug")
+#              .short("summary", "Summary")
+#              .paragraph("details", "What happened?"))
+#     rs.respond_modal(ix.id, modal)
+
+
+class Modal:
+    """A modal form — title, customId, and up to 5 inputs. Add inputs with
+    ``.short(...)`` / ``.paragraph(...)`` / ``.image(...)``. Chain ``.optional()``
+    after an input to make it not required."""
+
+    def __init__(self, custom_id: str, title: str):
+        self.custom_id = custom_id
+        self.title = title
+        self._inputs: List[dict] = []
+
+    def short(self, custom_id: str, label: str, placeholder: Optional[str] = None,
+              max_length: int = 1000, value: Optional[str] = None) -> "Modal":
+        self._inputs.append({
+            "customId": custom_id, "label": label, "style": "short",
+            "placeholder": placeholder, "required": True,
+            "maxLength": max_length, "value": value,
+        })
+        return self
+
+    def paragraph(self, custom_id: str, label: str, placeholder: Optional[str] = None,
+                  max_length: int = 1000, value: Optional[str] = None) -> "Modal":
+        self._inputs.append({
+            "customId": custom_id, "label": label, "style": "paragraph",
+            "placeholder": placeholder, "required": True,
+            "maxLength": max_length, "value": value,
+        })
+        return self
+
+    def image(self, custom_id: str, label: str, current_url: Optional[str] = None,
+              multiple: bool = False) -> "Modal":
+        self._inputs.append({
+            "customId": custom_id, "label": label, "style": "image",
+            "required": True, "multiple": multiple, "currentUrl": current_url,
+        })
+        return self
+
+    def optional(self) -> "Modal":
+        """Mark the LAST added input as optional."""
+        if self._inputs:
+            self._inputs[-1]["required"] = False
+        return self
+
+    def required(self) -> "Modal":
+        """Mark the last added input as required (already the default)."""
+        if self._inputs:
+            self._inputs[-1]["required"] = True
+        return self
+
+    def to_dict(self) -> dict:
+        return {
+            "title": self.title,
+            "customId": self.custom_id,
+            "inputs": [dict(i) for i in self._inputs],
+        }
+
+
 # ════════════════════════ Main client ══════════════════════════════════
 
 
@@ -531,24 +702,85 @@ class Rolespace:
         """All roles in the server, highest position first."""
         return [RolespaceRole(r) for r in _unwrap_list(self.get(f"/servers/{id}/roles"))]
 
+    # ---- Role / permission convenience helpers ──────────────────────────
+
+    def member_roles(self, server_id: int, user_id: int) -> List[RolespaceRole]:
+        """Resolve a member's role ids into the full RolespaceRole objects
+        (name, color, permissions)."""
+        member = self.server_member(server_id, user_id)
+        roles = self.server_roles(server_id)
+        ids = set(member.role_ids)
+        return [r for r in roles if r.id in ids]
+
+    def has_role(self, server_id: int, user_id: int, role: Union[int, str]) -> bool:
+        """True if the member has the given role. Pass an int id, or a name string
+        (case-insensitive). Returns False if no role with that name exists.
+
+        Example::
+
+            if rs.has_role(server_id, msg.author.id, "Moderator"):
+                rs.send_message(server_id, channel_id, "yes, boss")
+        """
+        member = self.server_member(server_id, user_id)
+        if isinstance(role, int):
+            return role in member.role_ids
+        if not role or not isinstance(role, str):
+            return False
+        wanted = role.strip().lower()
+        roles = self.server_roles(server_id)
+        match = next((r for r in roles if r.name.lower() == wanted), None)
+        return match is not None and match.id in member.role_ids
+
+    def has_permission(self, server_id: int, user_id: int, permission: str) -> bool:
+        """True if the member is allowed to perform the named action. The server owner
+        and anyone with the ``administrator`` flag always pass.
+
+        Accepted names (case-insensitive): ``administrator``, ``manageServer``,
+        ``manageRoles``, ``manageChannels``, ``manageMessages``, ``kickMembers``,
+        ``banMembers``, ``sendMessages``, ``viewChannels``, ``addReactions``.
+
+        Example::
+
+            if rs.has_permission(server_id, msg.author.id, "banMembers"):
+                rs.ban_member(server_id, target_id, "spam")
+        """
+        member = self.server_member(server_id, user_id)
+        if member.is_owner:
+            return True
+        roles = self.server_roles(server_id)
+        ids = set(member.role_ids)
+        for r in (r for r in roles if r.id in ids):
+            perms = r.permissions or {}
+            if perms.get("administrator"):
+                return True
+            if _permission_flag(perms, permission):
+                return True
+        return False
+
     def send_message(
         self,
         server_id: int,
         channel_id: int,
-        content: Union[str, RolespaceEmbed, dict, None] = None,
-        *embeds: RolespaceEmbed,
+        content: Union[str, RolespaceEmbed, "Components", dict, None] = None,
+        *extras,
     ) -> RolespaceMessage:
         """Send a message.
+
+        Extras can be ``RolespaceEmbed`` instances (up to 10) and/or a single
+        ``Components`` panel — pass them in any order alongside the text.
 
         Examples::
 
             rs.send_message(server_id, channel_id, "Hello!")
             rs.send_message(server_id, channel_id, "Heads up:", embed)
             rs.send_message(server_id, channel_id, "Two updates:", e1, e2)
-            rs.send_message(server_id, channel_id, embed)          # embed only
+            rs.send_message(server_id, channel_id, "Pick one:", panel)        # Components
+            rs.send_message(server_id, channel_id, "Heads up:", embed, panel) # both
+            rs.send_message(server_id, channel_id, embed)                     # embed only
+            rs.send_message(server_id, channel_id, panel)                     # panel only
             rs.send_message(server_id, channel_id, {"content": "raw payload"})
         """
-        payload = _build_message_payload(content, embeds)
+        payload = _build_message_payload(content, extras)
         return RolespaceMessage(
             self.post(f"/servers/{server_id}/channels/{channel_id}/messages", payload)
         )
@@ -821,8 +1053,42 @@ class Rolespace:
                 time.sleep(idle_delay)
 
     def respond(self, interaction_id: int, reply: dict) -> Any:
-        """Respond to an interaction. ``reply`` is ``{"type": "message"|"update"|"modal"|"ack", ...}``."""
+        """Respond to an interaction. ``reply`` is ``{"type": "message"|"update"|"modal"|"ack", ...}``.
+        Most callers want one of the typed ``respond_*`` helpers below instead."""
         return self.post(f"/interactions/{interaction_id}/callback", reply)
+
+    # ---- Typed interaction response helpers ─────────────────────────────────
+
+    def respond_ack(self, interaction_id: int) -> Any:
+        """Acknowledge an interaction with no visible response."""
+        return self.post(f"/interactions/{interaction_id}/callback", {"type": "ack"})
+
+    def respond_message(self, interaction_id: int, content: Union[str, RolespaceEmbed, "Components", None] = "",
+                        *extras, ephemeral: bool = False) -> Any:
+        """Post a new message in response to an interaction. Pass extras (embeds and/or one
+        Components panel) the same way as ``send_message``. ``ephemeral=True`` makes the reply
+        visible only to the user who interacted."""
+        payload = _build_message_payload(content, extras)
+        payload["type"] = "message"
+        payload["ephemeral"] = ephemeral
+        return self.post(f"/interactions/{interaction_id}/callback", payload)
+
+    def respond_update(self, interaction_id: int, content: Optional[str] = None,
+                       components: Optional["Components"] = None) -> Any:
+        """Edit the panel that was clicked. Pass ``None`` for either to leave it
+        unchanged; pass an empty ``Components()`` to remove the panel entirely."""
+        payload: dict = {"type": "update"}
+        if content is not None:
+            payload["content"] = content
+        if components is not None:
+            payload["components"] = components.to_list()
+        return self.post(f"/interactions/{interaction_id}/callback", payload)
+
+    def respond_modal(self, interaction_id: int, modal: "Modal") -> Any:
+        """Open a modal form in response to the interaction. Submission arrives as a
+        ``modal_submit`` interaction with the values in ``ix.data["fields"]``."""
+        return self.post(f"/interactions/{interaction_id}/callback",
+                         {"type": "modal", "modal": modal.to_dict()})
 
     # ---- Listening for new messages in a channel ─────────────────────────
     def watch_messages(
@@ -933,18 +1199,70 @@ def _unwrap_list(resp: Any) -> list:
     return []
 
 
-def _build_message_payload(content: Any, embeds: tuple) -> dict:
-    """Normalize send_message/send_dm arguments into the server's expected payload shape."""
-    embed_dicts = [e.to_dict() if isinstance(e, RolespaceEmbed) else e for e in embeds]
+# Accepted permission names (case-insensitive). Mirrors the C# enum surface.
+_PERMISSION_KEYS = {
+    "administrator":   "administrator",
+    "manageserver":    "manageServer",
+    "manageroles":     "manageRoles",
+    "managechannels":  "manageChannels",
+    "managemessages":  "manageMessages",
+    "kickmembers":     "kickMembers",
+    "banmembers":      "banMembers",
+    "sendmessages":    "sendMessages",
+    "viewchannels":    "viewChannels",
+    "addreactions":    "addReactions",
+}
 
-    if content is None:
-        return {"content": "", **({"embeds": embed_dicts} if embed_dicts else {})}
-    if isinstance(content, str):
-        return {"content": content, **({"embeds": embed_dicts} if embed_dicts else {})}
+
+def _permission_flag(perms: dict, name: Optional[str]) -> bool:
+    """True if `perms[name]` is truthy, matching keys case-insensitively.
+    Returns False for unknown names."""
+    if not name or not isinstance(name, str):
+        return False
+    key = _PERMISSION_KEYS.get(name.strip().lower())
+    return bool(perms.get(key)) if key else False
+
+
+def _build_message_payload(content: Any, extras: tuple) -> dict:
+    """Normalize send_message/send_dm arguments into the server's expected payload shape.
+
+    ``extras`` may contain any mix of ``RolespaceEmbed`` instances and one
+    ``Components`` panel — the result will carry both as appropriate keys.
+    """
+    # Promote a leading Embed / Components to the extras list so the rest of the
+    # logic stays uniform.
     if isinstance(content, RolespaceEmbed):
-        # Treat the leading embed as just another embed; no text.
-        return {"content": "", "embeds": [content.to_dict(), *embed_dicts]}
-    if isinstance(content, dict):
-        # Raw payload — caller knows what they're doing. Don't merge embeds into it.
+        extras = (content,) + tuple(extras)
+        content = ""
+    elif isinstance(content, Components):
+        extras = (content,) + tuple(extras)
+        content = ""
+    elif isinstance(content, dict):
+        # Raw payload — caller knows what they're doing. Don't merge extras into it.
         return dict(content)
-    raise TypeError(f"send_message: unsupported content type {type(content).__name__}")
+    elif content is None:
+        content = ""
+    elif not isinstance(content, str):
+        raise TypeError(f"send_message: unsupported content type {type(content).__name__}")
+
+    embed_dicts: List[dict] = []
+    components_payload = None
+    for x in extras:
+        if isinstance(x, RolespaceEmbed):
+            embed_dicts.append(x.to_dict())
+        elif isinstance(x, Components):
+            if components_payload is not None:
+                raise TypeError("send_message: only one Components panel is allowed per message.")
+            components_payload = x.to_list()
+        elif isinstance(x, dict):
+            # Allow a dict in extras for raw {embed_dict} cases.
+            embed_dicts.append(x)
+        else:
+            raise TypeError(f"send_message: unsupported extra type {type(x).__name__}")
+
+    out: dict = {"content": content}
+    if embed_dicts:
+        out["embeds"] = embed_dicts
+    if components_payload is not None:
+        out["components"] = components_payload
+    return out
