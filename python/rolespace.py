@@ -785,6 +785,26 @@ class Rolespace:
             self.post(f"/servers/{server_id}/channels/{channel_id}/messages", payload)
         )
 
+    def send_ephemeral(self, server_id: int, channel_id: int, recipient_user_id: int,
+                       content: Union[str, RolespaceEmbed, "Components", None] = "",
+                       *extras) -> dict:
+        """Send an ephemeral message to a single user in a channel — they see it,
+        nobody else does, and it's gone on reload. Accepts the same extras as
+        ``send_message`` (embeds and/or one Components panel).
+
+        Same scopes/permissions as a normal send, plus the recipient must be able
+        to view the channel.
+
+        Example::
+
+            # Reply ephemerally to whoever just typed "!secret":
+            rs.send_ephemeral(server_id, channel_id, msg.author.id,
+                              "Here's your private info 👀")
+        """
+        payload = _build_message_payload(content, extras)
+        payload["recipientAccountId"] = recipient_user_id
+        return self.post(f"/servers/{server_id}/channels/{channel_id}/ephemeral", payload)
+
     def list_messages(self, server_id: int, channel_id: int, limit: int = 50,
                       before: Optional[str] = None) -> List[RolespaceMessage]:
         """Recent messages, oldest → newest. Pass ``before`` (a message id) to page backwards."""

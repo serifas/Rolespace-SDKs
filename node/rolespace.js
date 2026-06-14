@@ -608,6 +608,27 @@ class Rolespace {
         return new RolespaceMessage(await this.post(`/servers/${serverId}/channels/${channelId}/messages`, payload));
     }
 
+    /**
+     * Send an ephemeral message to a single user in a channel — they see it,
+     * nobody else does, and it's gone on reload. Accepts the same extras as
+     * sendMessage (embeds and/or one Components panel).
+     *
+     * Same scopes/permissions as a normal send, plus the recipient must be
+     * able to view the channel.
+     *
+     *   // Reply ephemerally to whoever just typed "!secret":
+     *   await rs.sendEphemeral(serverId, channelId, msg.author.id,
+     *                          "Here's your private info 👀");
+     *
+     *   // With an embed + button panel:
+     *   await rs.sendEphemeral(serverId, channelId, userId, "Take your pick:", embed, panel);
+     */
+    async sendEphemeral(serverId, channelId, recipientUserId, ...rest) {
+        const payload = _buildMessagePayload(rest);
+        payload.recipientAccountId = recipientUserId;
+        return this.post(`/servers/${serverId}/channels/${channelId}/ephemeral`, payload);
+    }
+
     /** Fetch a single message by id. */
     async getMessage(serverId, channelId, messageId) {
         return new RolespaceMessage(await this.get(`/servers/${serverId}/channels/${channelId}/messages/${messageId}`));

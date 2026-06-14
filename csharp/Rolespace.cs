@@ -309,6 +309,37 @@ public sealed class RolespaceClient : IDisposable
         => new(await PostAsync($"/servers/{serverId}/channels/{channelId}/messages",
             payload, ct).ConfigureAwait(false));
 
+    // ---- Ephemeral messages (visible only to one user) ────────────────────
+
+    /// <summary>Send an ephemeral message to a single user in a channel — they see it,
+    /// nobody else does, and it's gone on reload. Useful for permission denials, private
+    /// confirmations after a chat command, etc. Same scopes/permissions as a normal send,
+    /// plus the recipient must be able to view the channel.</summary>
+    /// <example>
+    /// <code>
+    /// // Reply ephemerally to whoever just typed "!secret":
+    /// await rs.SendEphemeralAsync(serverId, channelId, msg.Author.Id, "Here's your private info 👀");
+    /// </code>
+    /// </example>
+    public Task<JsonElement> SendEphemeralAsync(long serverId, long channelId, long recipientUserId, string content, CancellationToken ct = default)
+        => PostAsync($"/servers/{serverId}/channels/{channelId}/ephemeral",
+            new { recipientAccountId = recipientUserId, content }, ct);
+
+    /// <summary>Ephemeral message with embed(s).</summary>
+    public Task<JsonElement> SendEphemeralAsync(long serverId, long channelId, long recipientUserId, string content, params RolespaceEmbed[] embeds)
+        => PostAsync($"/servers/{serverId}/channels/{channelId}/ephemeral",
+            new { recipientAccountId = recipientUserId, content, embeds });
+
+    /// <summary>Ephemeral message with an interactive panel (buttons / selects).</summary>
+    public Task<JsonElement> SendEphemeralAsync(long serverId, long channelId, long recipientUserId, string content, RolespaceComponents components, CancellationToken ct = default)
+        => PostAsync($"/servers/{serverId}/channels/{channelId}/ephemeral",
+            new { recipientAccountId = recipientUserId, content, components = components.ToPayload() }, ct);
+
+    /// <summary>Ephemeral message with text + embed(s) + an interactive panel.</summary>
+    public Task<JsonElement> SendEphemeralAsync(long serverId, long channelId, long recipientUserId, string content, RolespaceEmbed[] embeds, RolespaceComponents components, CancellationToken ct = default)
+        => PostAsync($"/servers/{serverId}/channels/{channelId}/ephemeral",
+            new { recipientAccountId = recipientUserId, content, embeds, components = components.ToPayload() }, ct);
+
     /// <summary>List recent messages, oldest → newest. <paramref name="before"/> pages backwards.</summary>
     public async Task<List<RolespaceMessage>> ListMessagesAsync(long serverId, long channelId,
         int limit = 50, string? before = null, CancellationToken ct = default)
